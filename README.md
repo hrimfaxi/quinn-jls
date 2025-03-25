@@ -33,3 +33,10 @@ Quinn-jls 是 [quinn](https://github.com/quinn-rs/quinn) 的fork 分支，该库
 
 对大多数用户来说，他们不会使用服务器集群部署QUIC，因此
 不会遭受重放攻击。
+
+### 已知的问题
+1. @RPRX 指出, 如果使能0RTT，可以通过流量劫持识别JLS具体来说
+    - 假设JLS伪装为microsoft.com
+    - 将0RTT client hello 重定向到microsoft.com后， 0RTT 将被拒绝，退化为1RTT。可以根据这一行为识别JLS
+    - 不过，劫持QUIC流量成本较高（需要解密Initial Packet），该探测暂时应该较难被GFW实现
+    - 如果担心这一风险，建议关闭0RTT。

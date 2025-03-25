@@ -31,3 +31,9 @@ client will try to send a 1 rtt client hello, and middle man will redirect this 
 For most users, they only use one server as proxy. In such a case, zero rtt is a safe choice
 
 
+### Known Issues
+1. As @RPRX pointed, If 0RTT enabled, hijacking 0RTT data could be used to detect JLS. In detail:
+    - Assume JLS is using microsoft.con as underlying SNI
+    - Redirect 0RTT client hello to microsoft.com and 0RTT will be rejected degenerate to be 1RTT
+    - However, hijacking QUIC is expensive since Initial Packet is encrypted, though the key is known.
+    - If you are concerned with this, disabling 0RTT directly.
