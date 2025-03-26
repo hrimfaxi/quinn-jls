@@ -123,6 +123,14 @@ impl crypto::Session for NoProtectionSession {
     ) -> Result<(), crypto::ExportKeyingMaterialError> {
         self.inner.export_keying_material(output, label, context)
     }
+
+    fn is_jls(&self) -> Option<bool> {
+        self.inner.is_jls()
+    }
+
+    fn jls_upstream_addr(&self) -> Option<std::net::SocketAddr> {
+        self.inner.jls_upstream_addr()
+    }
 }
 
 impl crypto::ClientConfig for NoProtectionClientConfig {
