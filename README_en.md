@@ -29,7 +29,7 @@ to be used at most once.
 client will try to send a 1 rtt client hello, and middle man will redirect this message to server B and use captured 0 rtt client hello to connect server A. Then, a successful replay attack is performed. However, for a single server proxy, this won't happen.
 
 For most users, they only use one server as proxy. In such a case, zero rtt is a safe choice
-
+If proxies share the same server name, they can use different password for different servers to prevent replay. In one word replay attack is not effective for JLS.
 
 ### Known Issues
 1. As @RPRX pointed, If 0RTT enabled, hijacking 0RTT data could be used to detect JLS. In detail:
