@@ -2637,6 +2637,22 @@ impl Connection {
                 .set_immediate_ack_required();
         }
 
+        // Stop sending serverhello if jls authentication failed
+        match self.crypto.is_jls() {
+            Some(true) => {
+                debug!("JLS authenticated");
+            }
+            Some(false) => {
+                warn!("JLS authentication falied");
+                if self.side() == Side::Server {
+                    return Ok(());
+                }
+            }
+            None => {
+                warn!("JLS not authenticated");
+            }
+        }
+
         self.write_crypto();
         Ok(())
     }

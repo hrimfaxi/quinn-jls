@@ -20,7 +20,7 @@ hdrhistogram = { workspace = true }
 quinn = { path = "../quinn" }
 quinn-proto = { path = "../quinn-proto" }
 rcgen = { workspace = true }
-rustls = { workspace = true }
+rustls = { workspace = true, git="https://github.com/spongebob888/rustls-jls", branch="jls-dev",default-features=false,features = ["dangerous_configuration"]}
 rustls-pemfile = { workspace = true }
 serde = { workspace = true, optional = true  }
 serde_json = { workspace = true, optional = true }
