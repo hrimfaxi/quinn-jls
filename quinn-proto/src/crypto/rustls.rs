@@ -204,7 +204,7 @@ impl crypto::Session for TlsSession {
         self.inner.jls_authed
     }
 
-    fn jls_upstream_addr(&self) -> Option<std::net::SocketAddr> {
+    fn jls_upstream_addr(&self) -> Option<String> {
         match &self.inner {
             Connection::Server(conn) => {
                 return conn.get_upstream_addr();

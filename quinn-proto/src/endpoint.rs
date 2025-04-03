@@ -15,24 +15,12 @@ use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    Duration, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken,
-    Side, Transmit, TransportConfig, TransportError,
-    cid_generator::ConnectionIdGenerator,
-    coding::BufMutExt,
-    config::{ClientConfig, EndpointConfig, ServerConfig},
-    connection::{Connection, ConnectionError, SideArgs},
-    crypto::{self, Keys, UnsupportedVersion},
-    frame,
-    packet::{
-        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError,
-        PacketNumber, PartialDecode, ProtectedInitialHeader,
-    },
-    shared::{
+    cid_generator::ConnectionIdGenerator, coding::BufMutExt, config::{ClientConfig, EndpointConfig, ServerConfig}, connection::{Connection, ConnectionError, JlsAuthInner, SideArgs}, crypto::{self, Keys, UnsupportedVersion}, frame, packet::{
+        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, Packet, PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader
+    }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    },
-    token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload},
-    transport_parameters::{PreferredAddress, TransportParameters},
+    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
 };
 
 /// The main entry point to the library
@@ -635,6 +623,13 @@ impl Endpoint {
         );
         self.index.insert_initial(dst_cid, ch);
 
+        // For JLS forward
+        let packet_clone = InitialPacket {
+            header: incoming.packet.header.clone(),
+            header_data: incoming.packet.header_data.clone(),
+            payload: incoming.packet.payload.clone(),
+        };
+
         match conn.handle_first_packet(
             incoming.received_at,
             incoming.addresses.remote,
@@ -644,30 +639,39 @@ impl Endpoint {
             incoming.rest,
         ) {
             Ok(()) => {
-                // Reconstruct client hello to forward to upstream
+                // JLS Check
                 if conn.crypto_session().is_jls() == Some(false) {
-                    debug!("start forward connection");
-                    let mut buf = BytesMut::default();
-                    let partial_encode = packet_clone.header.encode(&mut buf);
-                    buf.extend_from_slice(&packet_clone.payload);
-                    partial_encode.finish(
-                        &mut buf,
-                        crypto.header.remote.as_ref(),
-                        Some((packet_number, crypto.packet.remote.as_ref())),
-                    );
-                    // Remove connection information added by add_connection function
+                    debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);
-                    Some(DatagramEvent::NewForward(ch, conn, buf))
-                } else {
-                    trace!(id = ch.0, icid = %dst_cid, "new connection");
 
-                    for event in incoming_buffer.datagrams {
-                        conn.handle_event(ConnectionEvent(ConnectionEventInner::Datagram(event)))
-                    }
-
-                    Ok((ch, conn))
+                    let packet_clone: Packet = packet_clone.into();  
+                    let _partial_encode = packet_clone.header.encode(buf); // To be confirmed
+                    buf.extend_from_slice(&packet_clone.payload);
+                    let trans = Transmit {
+                        destination: incoming.addresses.remote,
+                        ecn: incoming.ecn,
+                        size: buf.len(),
+                        segment_size: None,
+                        src_ip: None,
+                    };
+                    return Err(
+                        AcceptError {
+                            cause: ConnectionError::JlsAuthFailed(JlsAuthInner{
+                                upstream_addr: conn.crypto_session().jls_upstream_addr(),
+                            }),
+                            response: Some(trans),
+                        });
                 }
+                // JLS Check End
+
+                trace!(id = ch.0, icid = %dst_cid, "new connection");
+
+                for event in incoming_buffer.datagrams {
+                    conn.handle_event(ConnectionEvent(ConnectionEventInner::Datagram(event)))
+                }
+
+                Ok((ch, conn))
             }
             Err(e) => {
                 debug!("handshake failed: {}", e);
@@ -1169,9 +1173,6 @@ pub enum DatagramEvent {
     NewConnection(Incoming),
     /// Response generated directly by the endpoint
     Response(Transmit),
-    /// JLS: Forward connection.
-    /// BytesMut is the clienthello to forward
-    NewForward(ConnectionHandle, Connection, BytesMut),
 }
 
 /// An incoming connection for which the server has not yet begun its part of the handshake.

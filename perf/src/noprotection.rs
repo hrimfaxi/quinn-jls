@@ -132,7 +132,7 @@ impl crypto::Session for NoProtectionSession {
         self.inner.is_jls()
     }
 
-    fn jls_upstream_addr(&self) -> Option<std::net::SocketAddr> {
+    fn jls_upstream_addr(&self) -> Option<String> {
         self.inner.jls_upstream_addr()
     }
 }

@@ -97,7 +97,7 @@ pub trait Session: Send + Sync + 'static {
 
     /// Return the jls forward upstream addr return None if not found or it's 
     /// authentic jls connection
-    fn jls_upstream_addr(&self) -> Option<SocketAddr>;
+    fn jls_upstream_addr(&self) -> Option<String>;
 }
 
 /// A pair of keys for bidirectional communication

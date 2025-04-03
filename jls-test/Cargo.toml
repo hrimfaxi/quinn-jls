@@ -1,26 +1,20 @@
 [package]
-name = "perf"
+name = "jls-test"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[features]
-# NOTE: Please keep this in sync with the feature list in `.github/workflows/codecov.yml`, see
-# comment in that file for more information.
-default = ["json-output"]
-# Allow for json output from the perf client
-json-output = ["serde", "serde_json"]
-
 [dependencies]
 anyhow = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
+env_logger = "0.11.8"
 hdrhistogram = { workspace = true }
 quinn = { path = "../quinn" }
 quinn-proto = { path = "../quinn-proto" }
 rcgen = { workspace = true }
-rustls = { workspace = true }
+rustls = { workspace = true, features = ["logging"]}
 rustls-pemfile = { workspace = true }
 serde = { workspace = true, optional = true  }
 serde_json = { workspace = true, optional = true }
@@ -28,3 +22,6 @@ socket2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "net"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+rustls_raw = {workspace = true}
+quinn_raw = {workspace = true}  # Still dependent on rustls-jls, don't know how to solve

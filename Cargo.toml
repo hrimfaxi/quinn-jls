@@ -1,5 +1,5 @@
 [workspace]
-members = ["quinn", "quinn-proto", "quinn-udp", "bench", "perf", "fuzz"]
+members = ["quinn", "quinn-proto", "quinn-udp", "bench", "perf", "fuzz", "jls-test"]
 default-members = ["quinn", "quinn-proto", "quinn-udp", "bench", "perf"]
 resolver = "2"
 
@@ -56,8 +56,19 @@ web-time = "1"
 windows-sys = { version = ">=0.52, <=0.59", features = ["Win32_Foundation", "Win32_System_IO", "Win32_Networking_WinSock"] }
 cfg_aliases = "0.2"
 
+rustls_raw = { package = "rustls",git = "https://github.com/rustls/rustls",tag="v/0.23.25", features = ["aws_lc_rs"] }
+quinn_raw = { package = "quinn",git = "https://github.com/quinn-rs/quinn",tag="quinn-0.11.7"}
+
+
 [profile.bench]
 debug = true
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+rustls = { git="https://github.com/spongebob888/rustls-jls", branch="jls-dev", default-features = false, features = ["std"] }
+# Only for testing
+[patch."https://github.com/quinn-rs/quinn"]
+rustls = { package = "rustls",git = "https://github.com/rustls/rustls",tag="v/0.23.25", features = ["aws_lc_rs"] }
+# Only for testing
