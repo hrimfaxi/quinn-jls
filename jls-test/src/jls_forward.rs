@@ -200,7 +200,7 @@ fn jls_failed(){
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .finish(),
     )
-    .unwrap();
+    .unwrap_or_default();
 
     env_logger::init();
     let mut roots = rustls::RootCertStore::empty();
