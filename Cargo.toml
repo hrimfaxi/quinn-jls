@@ -35,7 +35,7 @@ rand = "0.9"
 rcgen = "0.13"
 ring = "0.17"
 rustc-hash = "2"
-rustls = { version = "0.23.5", default-features = false, features = ["std"] }
+rustls = { git="https://github.com/spongebob888/rustls-jls", branch="jls-dev", default-features = false, features = ["std"] }
 rustls-pemfile = "2"
 rustls-platform-verifier = "0.5"
 rustls-pki-types = "1.7"
@@ -67,8 +67,8 @@ debug = true
 debug = true
 
 [patch.crates-io]
-rustls = { git="https://github.com/spongebob888/rustls-jls", branch="jls-dev", default-features = false, features = ["std"] }
+rustls = { git="https://github.com/spongebob888/rustls-jls", branch="jls-dev"}
 # Only for testing
 [patch."https://github.com/quinn-rs/quinn"]
-rustls = { package = "rustls",git = "https://github.com/rustls/rustls",tag="v/0.23.25", features = ["aws_lc_rs"] }
+rustls = { package = "rustls",git = "https://github.com/rustls/rustls",tag="v/0.23.25"}
 # Only for testing
