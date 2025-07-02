@@ -537,7 +537,7 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(AcceptError {
                 cause: ConnectionError::TimedOut,
-                response: None,
+                response: Default::default(),
             });
         }
 
@@ -546,14 +546,16 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(AcceptError {
                 cause: ConnectionError::CidsExhausted,
-                response: Some(self.initial_close(
-                    version,
-                    incoming.addresses,
-                    &incoming.crypto,
-                    &src_cid,
-                    TransportError::CONNECTION_REFUSED(""),
-                    buf,
-                )),
+                response: vec![
+                    (self.initial_close(
+                        version,
+                        incoming.addresses,
+                        &incoming.crypto,
+                        &src_cid,
+                        TransportError::CONNECTION_REFUSED(""),
+                        buf,
+                    )),
+                ],
             });
         }
 
@@ -572,7 +574,7 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(AcceptError {
                 cause: TransportError::PROTOCOL_VIOLATION("authentication failed").into(),
-                response: None,
+                response: Default::default(),
             });
         };
 
@@ -645,23 +647,37 @@ impl Endpoint {
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);
 
-                    let packet_clone: Packet = packet_clone.into();  
+                    let packet_clone: Packet = packet_clone.into();
                     let _partial_encode = packet_clone.header.encode(buf); // To be confirmed
                     buf.extend_from_slice(&packet_clone.payload);
+                    let mut trans_vec = vec![];
                     let trans = Transmit {
-                        destination: incoming.addresses.remote,
+                        destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
                         ecn: incoming.ecn,
                         size: buf.len(),
                         segment_size: None,
                         src_ip: None,
                     };
-                    return Err(
-                        AcceptError {
-                            cause: ConnectionError::JlsAuthFailed(JlsAuthInner{
-                                upstream_addr: conn.crypto_session().jls_upstream_addr(),
-                            }),
-                            response: Some(trans),
-                        });
+                    trans_vec.push(trans);
+                    for event in incoming_buffer.datagrams {
+                        let pos = buf.len();
+                        buf.extend_from_slice(event.first_decode.data());
+                        buf.extend_from_slice(event.remaining.unwrap_or_default().as_ref());
+                        let trans = Transmit {
+                            destination: event.remote, // Will be replaced later by jls upstream address
+                            ecn: event.ecn,
+                            size: buf.len() - pos,
+                            segment_size: None,
+                            src_ip: None,
+                        };
+                        trans_vec.push(trans);
+                    }
+                    return Err(AcceptError {
+                        cause: ConnectionError::JlsAuthFailed(JlsAuthInner {
+                            upstream_addr: conn.crypto_session().jls_upstream_addr(),
+                        }),
+                        response: trans_vec,
+                    });
                 }
                 // JLS Check End
 
@@ -677,15 +693,15 @@ impl Endpoint {
                 debug!("handshake failed: {}", e);
                 self.handle_event(ch, EndpointEvent(EndpointEventInner::Drained));
                 let response = match e {
-                    ConnectionError::TransportError(ref e) => Some(self.initial_close(
+                    ConnectionError::TransportError(ref e) => vec![self.initial_close(
                         version,
                         incoming.addresses,
                         &incoming.crypto,
                         &src_cid,
                         e.clone(),
                         buf,
-                    )),
-                    _ => None,
+                    )],
+                    _ => vec![],
                 };
                 Err(AcceptError { cause: e, response })
             }
@@ -1296,7 +1312,7 @@ pub struct AcceptError {
     /// Underlying error describing reason for failure
     pub cause: ConnectionError,
     /// Optional response to transmit back
-    pub response: Option<Transmit>,
+    pub response: Vec<Transmit>,
 }
 
 /// Error for attempting to retry an [`Incoming`] which already bears a token from a previous retry

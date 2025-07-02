@@ -1,14 +1,26 @@
 #![cfg(test)]
 
+use std::{
+    io::{self, Write},
+    net::ToSocketAddrs,
+    sync::Arc,
+    time::Duration,
+    u32::MAX,
+};
 
-use std::{ io::{self, Write}, net::ToSocketAddrs, sync::Arc, time::Duration, u32::MAX};
-
-use quinn::{crypto::rustls::{QuicClientConfig, QuicServerConfig}, ClientConfig};
-use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}, JlsConfig, JlsServerConfig};
-use tracing::{error, info, info_span, Instrument};
 use anyhow::{Context, Result, anyhow, bail};
+use quinn::{
+    ClientConfig,
+    crypto::rustls::{QuicClientConfig, QuicServerConfig},
+};
+use rcgen::CertifiedKey;
+use rustls::{
+    JlsConfig, JlsServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+};
+use tracing::{Instrument, error, info, info_span};
 
-async fn handle_quic_connection(resp:String, conn: quinn_raw::Incoming) -> Result<()> {
+async fn handle_quic_connection(resp: String, conn: quinn_raw::Incoming) -> Result<()> {
     let connection = conn.await?;
     let span = info_span!(
         "connection",
@@ -53,14 +65,13 @@ async fn handle_quic_connection(resp:String, conn: quinn_raw::Incoming) -> Resul
 }
 
 async fn handle_quic_request(
-    rsp:String,
+    rsp: String,
     (mut send, mut recv): (quinn_raw::SendStream, quinn_raw::RecvStream),
 ) -> Result<()> {
     let req = recv
         .read_to_end(64 * 1024)
         .await
         .map_err(|e| anyhow!("failed reading request: {}", e))?;
-
 
     // Write the response
     send.write_all(rsp.as_bytes()).await;
@@ -73,12 +84,11 @@ async fn handle_quic_request(
     Ok(())
 }
 
-
-async fn make_jls_server(resp:String, port: u16) -> Result<()>{
+async fn make_jls_server(resp: String, port: u16) -> Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();
-    
+
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())?;
@@ -88,38 +98,42 @@ async fn make_jls_server(resp:String, port: u16) -> Result<()>{
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
 
-    let endpoint = quinn::Endpoint::server(server_config, 
-        format!("127.0.0.1:{}",port).to_socket_addrs()?.next().unwrap())?;
+    let endpoint = quinn::Endpoint::server(
+        server_config,
+        format!("127.0.0.1:{}", port)
+            .to_socket_addrs()?
+            .next()
+            .unwrap(),
+    )?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
-    
     while let Some(conn) = endpoint.accept().await {
         let rv = conn.await;
-        info!("JLS Server:{:?}",rv);
+        info!("JLS Server:{:?}", rv);
         assert!(rv.is_err());
     }
     Ok(())
 }
 
-
-async fn make_quic_server(resp:String, port: u16) -> Result<()>{
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+async fn make_quic_server(cert: CertifiedKey, resp: String, port: u16) -> Result<()> {
     let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let cert = cert.cert.into();
-    
+
     let mut server_crypto = quinn_raw::rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())?;
     server_crypto.max_early_data_size = std::u32::MAX;
 
-    let mut server_config =
-        quinn_raw::ServerConfig::with_crypto(Arc::new(quinn_raw::crypto::rustls::QuicServerConfig::try_from(server_crypto)?));
+    let mut server_config = quinn_raw::ServerConfig::with_crypto(Arc::new(
+        quinn_raw::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
+    ));
 
-    let endpoint = quinn_raw::Endpoint::server(server_config, 
-        format!("[::]:{}",port).to_socket_addrs()?.next().unwrap())?;
+    let endpoint = quinn_raw::Endpoint::server(
+        server_config,
+        format!("[::]:{}", port).to_socket_addrs()?.next().unwrap(),
+    )?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
-    
     while let Some(conn) = endpoint.accept().await {
         info!("accepting connection");
         let fut = handle_quic_connection(resp.clone(), conn);
@@ -132,9 +146,14 @@ async fn make_quic_server(resp:String, port: u16) -> Result<()>{
     Ok(())
 }
 
-async fn make_client(client_crypto:rustls::ClientConfig,port: usize, zero_rtt: bool) -> Result<()> {
+async fn make_client(
+    client_crypto: rustls::ClientConfig,
+    port: usize,
+    zero_rtt: bool,
+    jls: bool,
+) -> Result<()> {
     let host = "localhost";
-    let remote = format!("{}:{}","127.0.0.1", port)
+    let remote = format!("{}:{}", "127.0.0.1", port)
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| anyhow!("couldn't resolve to an address"))?;
@@ -148,28 +167,24 @@ async fn make_client(client_crypto:rustls::ClientConfig,port: usize, zero_rtt: b
 
     eprintln!("connecting to {remote}");
 
-    let conn = match endpoint
-        .connect(remote, host)?.into_0rtt() {
-            Ok((conn, accpetd)) => { 
-                tokio::spawn(async move {
-                    assert!(accpetd.await == zero_rtt);
-                    info!("0-RTT data accepted");
-                });
-                conn
-            },
-            Err(conn) => { 
-                assert!(zero_rtt == false);
-                conn.await?
-            },
-        };
-    
-
+    let conn = match endpoint.connect(remote, host)?.into_0rtt() {
+        Ok((conn, accpetd)) => {
+            tokio::spawn(async move {
+                assert!(accpetd.await == zero_rtt);
+                info!("0-RTT data accepted");
+            });
+            conn
+        }
+        Err(conn) => {
+            assert!(zero_rtt == false);
+            conn.await?
+        }
+    };
 
     let (mut send, mut recv) = conn
         .open_bi()
         .await
         .map_err(|e| anyhow!("failed to open stream: {}", e))?;
-
 
     send.write_all(request.as_bytes())
         .await
@@ -183,7 +198,7 @@ async fn make_client(client_crypto:rustls::ClientConfig,port: usize, zero_rtt: b
         .map_err(|e| anyhow!("failed to read response: {}", e))?;
     assert!(resp == b"quic_server:test");
     info!("jls authed:{:?}", conn.is_jls());
-    assert!(conn.is_jls() == Some(true));
+    assert!(conn.is_jls() == Some(jls));
     io::stdout().write_all(&resp).unwrap();
     io::stdout().flush().unwrap();
     conn.close(0u32.into(), b"done");
@@ -193,7 +208,7 @@ async fn make_client(client_crypto:rustls::ClientConfig,port: usize, zero_rtt: b
     Ok(())
 }
 #[test]
-fn jls_failed(){
+fn jls_failed() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -202,32 +217,36 @@ fn jls_failed(){
     .unwrap_or_default();
 
     env_logger::init();
+
+    let certkey = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = certkey.cert.der().clone();
     let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
     let mut client_crypto = rustls::ClientConfig::builder()
-    .with_root_certificates(roots)
-    .with_no_client_auth(); 
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     client_crypto.enable_early_data = true;
     client_crypto.jls_config = JlsConfig::new("12", "123");
-
-
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-
             let h1 = tokio::spawn(async {
-                let h1 = make_quic_server("quic_server:".into(), 4445).await.unwrap();
+                let h1 = make_quic_server(certkey, "quic_server:".into(), 4445)
+                    .await
+                    .unwrap();
             });
             let h2 = tokio::spawn(async {
                 let h1 = make_jls_server("jls_server:".into(), 4444).await.unwrap();
             });
             tokio::time::sleep(Duration::from_millis(200)).await;
-            make_client(client_crypto.clone(), 4444, false).await.unwrap();
+            make_client(client_crypto.clone(), 4444, false, false)
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(2000)).await;
         });
-
 
     ()
 }

@@ -478,7 +478,7 @@ impl TestEndpoint {
                 Ok(ch)
             }
             Err(error) => {
-                if let Some(transmit) = error.response {
+                for transmit in error.response {
                     let size = transmit.size;
                     self.outbound.extend(split_transmit(transmit, &buf[..size]));
                 }

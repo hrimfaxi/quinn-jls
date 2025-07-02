@@ -424,7 +424,7 @@ impl EndpointInner {
             Ok((handle, conn)) => {
                 state.stats.accepted_handshakes += 1;
                 let socket = state.socket.clone();
-                let runtime = state.runtime.clone();
+                let runtime: Arc<dyn Runtime> = state.runtime.clone();
                 Ok(state
                     .recv_state
                     .connections
@@ -433,12 +433,21 @@ impl EndpointInner {
             Err(error) => {
                 if let ConnectionError::JlsAuthFailed(inner) = &error.cause {
                     if let Some(upstream_addr) = &inner.upstream_addr {
-                        let upstream_addr: SocketAddr = upstream_addr.to_socket_addrs()
-                        .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?.
-                        next().ok_or(ConnectionError::JlsForwardError("jls upstream domain name resolved failed".into()))?;
+                        let upstream_addr: SocketAddr = upstream_addr
+                            .to_socket_addrs()
+                            .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?
+                            .next()
+                            .ok_or(ConnectionError::JlsForwardError(
+                                "jls upstream domain name resolved failed".into(),
+                            ))?;
                         debug!("new forward connection");
+                        let bind_addr = if upstream_addr.is_ipv6() {
+                            "[::]:0"
+                        } else {
+                            "0.0.0.0:0"
+                        };
                         let socket =
-                            std::net::UdpSocket::bind("[::]:0".parse::<SocketAddr>().unwrap())
+                            std::net::UdpSocket::bind(bind_addr.parse::<SocketAddr>().unwrap())
                                 .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?;
                         let udp_socket = state.runtime.wrap_udp_socket(socket).unwrap();
                         let recv_buf = vec![0; state.recv_state.recv_buf.len()];
@@ -449,15 +458,22 @@ impl EndpointInner {
                             active_time: now.clone(),
                         };
 
-                        respond(error.response.unwrap(), &response_buffer, &*udp_socket);
-                        state.recv_state
+                        let mut pos = 0;
+                        for mut trans in error.response {
+                            let size = trans.size;
+                            trans.destination = upstream_addr;
+                            respond(trans, &response_buffer[pos..], &*udp_socket);
+                            pos += size;
+                        }
+                        state
+                            .recv_state
                             .jls_state
                             .upstream_connections
                             .insert(remote_addr, jls_conn);
                         return Err(error.cause);
                     }
                 }
-                if let Some(transmit) = error.response {
+                for transmit in error.response {
                     respond(transmit, &response_buffer, &*state.socket);
                 }
                 Err(error.cause)
@@ -513,16 +529,16 @@ pub(crate) struct JlsState {
 
 impl JlsState {
     fn handle_jls_forward(&mut self, buf: &BytesMut, meta: &RecvMeta) -> bool {
-        let segment_size =  if meta.stride < meta.len {
+        let segment_size = if meta.stride < meta.len {
             Some(meta.stride)
         } else {
             None
         };
         match self.upstream_connections.get_mut(&meta.addr) {
             Some(conn) => {
-                let trans = Transmit{
-                    destination:conn.upstream_addr, 
-                    ecn: meta.ecn.map(|x |EcnCodepoint::from_bits(x as u8).unwrap()),
+                let trans = Transmit {
+                    destination: conn.upstream_addr,
+                    ecn: meta.ecn.map(|x| EcnCodepoint::from_bits(x as u8).unwrap()),
                     segment_size: segment_size,
                     size: buf.len(),
                     src_ip: None,
@@ -614,10 +630,11 @@ impl State {
         for (remote, conn) in upstream_conns.iter_mut() {
             let mut metas = [RecvMeta::default(); BATCH_SIZE];
             let mut iovs: [IoSliceMut; BATCH_SIZE] = {
-                let mut bufs = conn.from_upstream
+                let mut bufs = conn
+                    .from_upstream
                     .chunks_mut(conn.from_upstream.len() / BATCH_SIZE)
                     .map(IoSliceMut::new);
-    
+
                 // expect() safe as self.recv_buf is chunked into BATCH_SIZE items
                 // and iovs will be of size BATCH_SIZE, thus from_fn is called
                 // exactly BATCH_SIZE times.
@@ -629,14 +646,16 @@ impl State {
                     Poll::Ready(Ok(msgs)) => {
                         for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
                             let data = &buf[0..meta.len];
-                            let segment_size =  if meta.stride < meta.len {
+                            let segment_size = if meta.stride < meta.len {
                                 Some(meta.stride)
                             } else {
                                 None
                             };
                             let trans = Transmit {
                                 destination: remote.clone(),
-                                ecn: meta.ecn.map(|x|proto::EcnCodepoint::from_bits(x as u8).unwrap()),
+                                ecn: meta
+                                    .ecn
+                                    .map(|x| proto::EcnCodepoint::from_bits(x as u8).unwrap()),
                                 segment_size: segment_size,
                                 src_ip: None,
                                 size: data.len(),
@@ -644,7 +663,6 @@ impl State {
 
                             respond(trans, data, &*self.socket);
                             trace!("recv from upstream: {:?} bytes", data.len());
-                                
                         }
                         conn.active_time = now;
                     }
