@@ -20,7 +20,7 @@ use crate::{
     }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
+    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, NoneTokenStore, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
 };
 
 /// The main entry point to the library
@@ -236,7 +236,18 @@ impl Endpoint {
             // connection. Send a stateless reset if possible.
 
             debug!("dropping packet with invalid CID");
-            None
+            
+
+            buf.extend_from_slice(event.first_decode.data());
+            buf.extend_from_slice(event.remaining.unwrap_or_default().as_ref());
+            let trans = Transmit {
+                destination: addresses.remote,
+                ecn: event.ecn,
+                size: buf.len(), // Size is unknown until we generate the reset
+                segment_size: None,
+                src_ip: None,
+            };
+            Some(DatagramEvent::JlsUpstreamMigrate(trans))
         } else if dst_cid.is_empty() {
             trace!("dropping unrecognized short packet without ID");
             None
@@ -1189,6 +1200,11 @@ pub enum DatagramEvent {
     NewConnection(Incoming),
     /// Response generated directly by the endpoint
     Response(Transmit),
+    /// JLS upstream migration detected
+    /// If JLS forwarding is ongoing, while client initiates an active migration
+    /// Then both the remote address and CID will change.
+    /// In this case, an unknow CID will be received
+    JlsUpstreamMigrate(Transmit),
 }
 
 /// An incoming connection for which the server has not yet begun its part of the handshake.

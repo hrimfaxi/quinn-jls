@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     str,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    task::{Context, Poll, Waker}, vec,
 };
 
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
@@ -26,7 +26,7 @@ use proto::{
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{Notify, futures::Notified, mpsc, watch::error};
+use tokio::{runtime, sync::{futures::Notified, mpsc, watch::error, Notify}};
 use tracing::{Instrument, Span};
 use udp::{BATCH_SIZE, RecvMeta};
 
@@ -407,6 +407,59 @@ pub(crate) struct EndpointInner {
     pub(crate) shared: Shared,
 }
 
+fn bind_upstream_socket(upstream_addr: &str) -> Result<(std::net::UdpSocket, SocketAddr), ConnectionError> {
+
+    let upstream_addr: SocketAddr = upstream_addr
+        .to_socket_addrs()
+        .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?
+        .next()
+        .ok_or(ConnectionError::JlsForwardError(
+            "jls upstream domain name resolved failed".into(),
+        ))?;
+    let bind_addr = if upstream_addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let socket =
+        std::net::UdpSocket::bind(bind_addr.parse::<SocketAddr>().unwrap())
+            .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?;
+    Ok((socket, upstream_addr))
+}
+fn insert_forward_conn(
+    jls_state: &mut JlsState,
+    runtime: &dyn Runtime,
+    trans: Vec<Transmit>,
+    response_buffer: &[u8],
+    upstream_addr: &str,
+    remote_addr: SocketAddr,
+    now: Instant) -> Result<(), ConnectionError> {
+    let (socket, upstream_addr) = bind_upstream_socket(upstream_addr)?;
+    debug!("new forward connection");
+
+    let udp_socket = runtime.wrap_udp_socket(socket).unwrap();
+    let recv_buf = vec![0; 128 * 1024]; // 128K receive buffer
+    let jls_conn = JlsForwardConnection {
+        upstream_socket: udp_socket.clone(),
+        upstream_addr: upstream_addr,
+        from_upstream: recv_buf.into(),
+        active_time: now.clone(),
+    };
+
+    let mut pos = 0;
+    for mut trans in trans {
+        let size = trans.size;
+        trans.destination = upstream_addr;
+        respond(trans, &response_buffer[pos..], &*udp_socket);
+        pos += size;
+    }
+    
+    jls_state
+        .upstream_connections
+        .insert(remote_addr, jls_conn);
+    Ok(())    
+}
+
 impl EndpointInner {
     pub(crate) fn accept(
         &self,
@@ -433,43 +486,35 @@ impl EndpointInner {
             Err(error) => {
                 if let ConnectionError::JlsAuthFailed(inner) = &error.cause {
                     if let Some(upstream_addr) = &inner.upstream_addr {
-                        let upstream_addr: SocketAddr = upstream_addr
-                            .to_socket_addrs()
-                            .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?
-                            .next()
-                            .ok_or(ConnectionError::JlsForwardError(
-                                "jls upstream domain name resolved failed".into(),
-                            ))?;
-                        debug!("new forward connection");
-                        let bind_addr = if upstream_addr.is_ipv6() {
-                            "[::]:0"
-                        } else {
-                            "0.0.0.0:0"
-                        };
-                        let socket =
-                            std::net::UdpSocket::bind(bind_addr.parse::<SocketAddr>().unwrap())
-                                .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?;
-                        let udp_socket = state.runtime.wrap_udp_socket(socket).unwrap();
-                        let recv_buf = vec![0; state.recv_state.recv_buf.len()];
-                        let jls_conn = JlsForwardConnection {
-                            upstream_socket: udp_socket.clone(),
-                            upstream_addr: upstream_addr,
-                            from_upstream: recv_buf.into(),
-                            active_time: now.clone(),
-                        };
+                        let runtime = state.runtime.clone();
+                        insert_forward_conn(&mut state.recv_state.jls_state,
+                             &*runtime,
+                             error.response, &response_buffer, 
+                             upstream_addr, remote_addr, now)?;
+                        // let (socket, upstream_addr) = bind_upstream_socket(upstream_addr)?;
+                        // debug!("new forward connection");
 
-                        let mut pos = 0;
-                        for mut trans in error.response {
-                            let size = trans.size;
-                            trans.destination = upstream_addr;
-                            respond(trans, &response_buffer[pos..], &*udp_socket);
-                            pos += size;
-                        }
-                        state
-                            .recv_state
-                            .jls_state
-                            .upstream_connections
-                            .insert(remote_addr, jls_conn);
+                        // let udp_socket = state.runtime.wrap_udp_socket(socket).unwrap();
+                        // let recv_buf = vec![0; state.recv_state.recv_buf.len()];
+                        // let jls_conn = JlsForwardConnection {
+                        //     upstream_socket: udp_socket.clone(),
+                        //     upstream_addr: upstream_addr,
+                        //     from_upstream: recv_buf.into(),
+                        //     active_time: now.clone(),
+                        // };
+
+                        // let mut pos = 0;
+                        // for mut trans in error.response {
+                        //     let size = trans.size;
+                        //     trans.destination = upstream_addr;
+                        //     respond(trans, &response_buffer[pos..], &*udp_socket);
+                        //     pos += size;
+                        // }
+                        // state
+                        //     .recv_state
+                        //     .jls_state
+                        //     .upstream_connections
+                        //     .insert(remote_addr, jls_conn);
                         return Err(error.cause);
                     }
                 }
@@ -737,16 +782,6 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
     }
 }
 
-fn upstream_udp_transmit(addr: &SocketAddr, size: usize) -> Transmit {
-    let remote = addr;
-    Transmit {
-        destination: remote.clone(),
-        ecn: None,
-        segment_size: None,
-        src_ip: None,
-        size: size,
-    }
-}
 
 #[derive(Debug)]
 struct ConnectionSet {
@@ -991,6 +1026,24 @@ impl RecvState {
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, socket);
+                                }
+                                Some(DatagramEvent::JlsUpstreamMigrate(transmit)) => {
+                                    // JLS forward connection
+                                    if let Some(upstream_addr) = endpoint.server_config()
+                                    .and_then(|x|x.crypto.jls_upstream_addr())
+                                     {
+                                        if let Err(e) = insert_forward_conn(
+                                            &mut self.jls_state,
+                                            runtime,
+                                            vec![transmit],
+                                            &response_buffer,
+                                            &upstream_addr,
+                                            meta.addr,
+                                            now,
+                                        ) {
+                                            tracing::error!("insert forward conn failed: {}", e);
+                                        }
+                                    }
                                 }
                                 None => {}
                             }

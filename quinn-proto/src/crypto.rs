@@ -149,6 +149,8 @@ pub trait ServerConfig: Send + Sync {
         version: u32,
         params: &TransportParameters,
     ) -> Box<dyn Session>;
+    /// get jls upstream addr
+    fn jls_upstream_addr(&self) -> Option<String>;
 }
 
 /// Keys used to protect packet payloads

@@ -399,6 +399,7 @@ impl TestEndpoint {
                         self.outbound.extend(split_transmit(transmit, &buf[..size]));
                         buf.clear();
                     }
+                    DatagramEvent::JlsUpstreamMigrate(_t) => {}
                 }
             }
         }

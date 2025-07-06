@@ -545,6 +545,9 @@ impl crypto::ServerConfig for QuicServerConfig {
         result.copy_from_slice(tag.as_ref());
         result
     }
+    fn jls_upstream_addr(&self) -> Option<String> {
+        self.inner.jls_config.upstream_addr.clone()
+    }
 }
 
 pub(crate) fn initial_suite_from_provider(
