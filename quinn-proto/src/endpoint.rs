@@ -642,6 +642,7 @@ impl Endpoint {
             header_data: incoming.packet.header_data.clone(),
             payload: incoming.packet.payload.clone(),
         };
+        let packet_rest = incoming.rest.clone();
 
         match conn.handle_first_packet(
             incoming.received_at,
@@ -661,6 +662,7 @@ impl Endpoint {
                     let packet_clone: Packet = packet_clone.into();
                     let _partial_encode = packet_clone.header.encode(buf); // To be confirmed
                     buf.extend_from_slice(&packet_clone.payload);
+                    buf.extend_from_slice(&packet_rest.unwrap_or_default());
                     let mut trans_vec = vec![];
                     let trans = Transmit {
                         destination: incoming.addresses.remote, // This will be replaced later by jls upstream address

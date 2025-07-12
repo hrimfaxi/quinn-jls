@@ -438,8 +438,8 @@ impl EndpointInner {
                              &*runtime,
                              error.response, &response_buffer, 
                              upstream_addr, remote_addr, now)?;
-                        return Err(error.cause);
                     }
+                    return Err(error.cause);
                 }
                 for transmit in error.response {
                     respond(transmit, &response_buffer, &*state.socket);
