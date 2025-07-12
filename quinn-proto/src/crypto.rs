@@ -8,7 +8,7 @@
 //! Note that usage of any protocol (version) other than TLS 1.3 does not conform to any
 //! published versions of the specification, and will not be supported in QUIC v1.
 
-use std::{any::Any, str, sync::Arc, net::SocketAddr};
+use std::{any::Any, str, sync::Arc};
 
 use bytes::BytesMut;
 
@@ -151,6 +151,8 @@ pub trait ServerConfig: Send + Sync {
     ) -> Box<dyn Session>;
     /// get jls upstream addr
     fn jls_upstream_addr(&self) -> Option<String>;
+    /// rate limit for jls in unit of bps
+    fn jls_rate_limit(&self) -> u64;
 }
 
 /// Keys used to protect packet payloads

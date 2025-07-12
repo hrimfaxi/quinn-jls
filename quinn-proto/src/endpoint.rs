@@ -20,7 +20,7 @@ use crate::{
     }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, NoneTokenStore, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
+    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
 };
 
 /// The main entry point to the library
@@ -221,11 +221,11 @@ impl Endpoint {
             }
         } else if event.first_decode.initial_header().is_some() {
             // Potentially create a new connection
-
+            tracing::trace!("initial packet received");
             self.handle_first_packet(datagram_len, event, addresses, buf)
         } else if event.first_decode.has_long_header() {
-            debug!(
-                "ignoring non-initial packet for unknown connection {}",
+            warn!(
+                "ignoring non-initial long header packet for unknown connection {}",
                 dst_cid
             );
             None
@@ -235,7 +235,7 @@ impl Endpoint {
             // If we got this far, we're receiving a seemingly valid packet for an unknown
             // connection. Send a stateless reset if possible.
 
-            debug!("dropping packet with invalid CID");
+            warn!("dropping packet with invalid CID");
             
 
             buf.extend_from_slice(event.first_decode.data());
@@ -642,6 +642,7 @@ impl Endpoint {
             header_data: incoming.packet.header_data.clone(),
             payload: incoming.packet.payload.clone(),
         };
+        let packet_rest = incoming.rest.clone();
 
         match conn.handle_first_packet(
             incoming.received_at,
@@ -653,7 +654,9 @@ impl Endpoint {
         ) {
             Ok(()) => {
                 // JLS Check
-                if conn.crypto_session().is_jls() == Some(false) {
+                // This requires the client hello must be fully received in the first packet
+                // Or the connection will be forwarded
+                if conn.crypto_session().is_jls() != Some(true) {
                     debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);
@@ -661,6 +664,7 @@ impl Endpoint {
                     let packet_clone: Packet = packet_clone.into();
                     let _partial_encode = packet_clone.header.encode(buf); // To be confirmed
                     buf.extend_from_slice(&packet_clone.payload);
+                    buf.extend_from_slice(&packet_rest.unwrap_or_default());
                     let mut trans_vec = vec![];
                     let trans = Transmit {
                         destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
