@@ -3,11 +3,7 @@
 //! Checkout the `README.md` for guidance.
 
 use std::{
-    ascii, fs, io,
-    net::SocketAddr,
-    path::{self, Path, PathBuf},
-    str,
-    sync::Arc,
+    ascii, fs, io, net::SocketAddr, option, path::{self, Path, PathBuf}, str, sync::Arc
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -122,7 +118,7 @@ async fn run(options: Opt) -> Result<()> {
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     server_crypto.jls_config = JlsServerConfig::new("user_pwd".into(), "user_iv".into(),
-     Some("upstreamaddr:11443".into()), None);
+     options.upstream_addr, None);
     server_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if options.keylog {
         server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
