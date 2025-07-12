@@ -221,11 +221,11 @@ impl Endpoint {
             }
         } else if event.first_decode.initial_header().is_some() {
             // Potentially create a new connection
-
+            tracing::trace!("initial packet received");
             self.handle_first_packet(datagram_len, event, addresses, buf)
         } else if event.first_decode.has_long_header() {
-            debug!(
-                "ignoring non-initial packet for unknown connection {}",
+            warn!(
+                "ignoring non-initial long header packet for unknown connection {}",
                 dst_cid
             );
             None
@@ -235,7 +235,7 @@ impl Endpoint {
             // If we got this far, we're receiving a seemingly valid packet for an unknown
             // connection. Send a stateless reset if possible.
 
-            debug!("dropping packet with invalid CID");
+            warn!("dropping packet with invalid CID");
             
 
             buf.extend_from_slice(event.first_decode.data());
@@ -654,7 +654,9 @@ impl Endpoint {
         ) {
             Ok(()) => {
                 // JLS Check
-                if conn.crypto_session().is_jls() == Some(false) {
+                // This requires the client hello must be fully received in the first packet
+                // Or the connection will be forwarded
+                if conn.crypto_session().is_jls() != Some(true) {
                     debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);

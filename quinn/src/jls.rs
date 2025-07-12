@@ -113,8 +113,11 @@ impl JlsState {
                     src_ip: None,
                 };
                 conn.active_time = now;
+                tracing::trace!("jls forward to upstream {} bytes", 
+                    trans.size);
                 conn.send_limiter.try_send(
                     buf,trans, &*conn.upstream_socket, now);
+
                 true
             }
             None => false,

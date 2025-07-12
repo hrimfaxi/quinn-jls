@@ -45,6 +45,8 @@ struct Opt {
     /// Maximum number of concurrent connections to allow
     #[clap(long = "connection-limit")]
     connection_limit: Option<usize>,
+    #[clap(long = "upstream-addr")]
+    upstream_addr: Option<String>,
 }
 
 fn main() {
