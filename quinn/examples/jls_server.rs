@@ -119,7 +119,8 @@ async fn run(options: Opt) -> Result<()> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    server_crypto.jls_config = JlsServerConfig::new("user_pwd", "user_iv", "upstream_addr.com:443");
+    server_crypto.jls_config = JlsServerConfig::new("user_pwd".into(), "user_iv".into(),
+     Some("upstreamaddr:11443".into()), None);
     server_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if options.keylog {
         server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());

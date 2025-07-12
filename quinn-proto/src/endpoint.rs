@@ -20,7 +20,7 @@ use crate::{
     }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, NoneTokenStore, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
+    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
 };
 
 /// The main entry point to the library

@@ -407,59 +407,6 @@ pub(crate) struct EndpointInner {
     pub(crate) shared: Shared,
 }
 
-fn bind_upstream_socket(upstream_addr: &str) -> Result<(std::net::UdpSocket, SocketAddr), ConnectionError> {
-
-    let upstream_addr: SocketAddr = upstream_addr
-        .to_socket_addrs()
-        .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?
-        .next()
-        .ok_or(ConnectionError::JlsForwardError(
-            "jls upstream domain name resolved failed".into(),
-        ))?;
-    let bind_addr = if upstream_addr.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let socket =
-        std::net::UdpSocket::bind(bind_addr.parse::<SocketAddr>().unwrap())
-            .map_err(|x| ConnectionError::JlsForwardError(x.to_string()))?;
-    Ok((socket, upstream_addr))
-}
-fn insert_forward_conn(
-    jls_state: &mut JlsState,
-    runtime: &dyn Runtime,
-    trans: Vec<Transmit>,
-    response_buffer: &[u8],
-    upstream_addr: &str,
-    remote_addr: SocketAddr,
-    now: Instant) -> Result<(), ConnectionError> {
-    let (socket, upstream_addr) = bind_upstream_socket(upstream_addr)?;
-    debug!("new forward connection");
-
-    let udp_socket = runtime.wrap_udp_socket(socket).unwrap();
-    let recv_buf = vec![0; 128 * 1024]; // 128K receive buffer
-    let jls_conn = JlsForwardConnection {
-        upstream_socket: udp_socket.clone(),
-        upstream_addr: upstream_addr,
-        from_upstream: recv_buf.into(),
-        active_time: now.clone(),
-    };
-
-    let mut pos = 0;
-    for mut trans in trans {
-        let size = trans.size;
-        trans.destination = upstream_addr;
-        respond(trans, &response_buffer[pos..], &*udp_socket);
-        pos += size;
-    }
-    
-    jls_state
-        .upstream_connections
-        .insert(remote_addr, jls_conn);
-    Ok(())    
-}
-
 impl EndpointInner {
     pub(crate) fn accept(
         &self,
@@ -487,34 +434,10 @@ impl EndpointInner {
                 if let ConnectionError::JlsAuthFailed(inner) = &error.cause {
                     if let Some(upstream_addr) = &inner.upstream_addr {
                         let runtime = state.runtime.clone();
-                        insert_forward_conn(&mut state.recv_state.jls_state,
+                        crate::jls::insert_forward_conn(&mut state.recv_state.jls_state,
                              &*runtime,
                              error.response, &response_buffer, 
                              upstream_addr, remote_addr, now)?;
-                        // let (socket, upstream_addr) = bind_upstream_socket(upstream_addr)?;
-                        // debug!("new forward connection");
-
-                        // let udp_socket = state.runtime.wrap_udp_socket(socket).unwrap();
-                        // let recv_buf = vec![0; state.recv_state.recv_buf.len()];
-                        // let jls_conn = JlsForwardConnection {
-                        //     upstream_socket: udp_socket.clone(),
-                        //     upstream_addr: upstream_addr,
-                        //     from_upstream: recv_buf.into(),
-                        //     active_time: now.clone(),
-                        // };
-
-                        // let mut pos = 0;
-                        // for mut trans in error.response {
-                        //     let size = trans.size;
-                        //     trans.destination = upstream_addr;
-                        //     respond(trans, &response_buffer[pos..], &*udp_socket);
-                        //     pos += size;
-                        // }
-                        // state
-                        //     .recv_state
-                        //     .jls_state
-                        //     .upstream_connections
-                        //     .insert(remote_addr, jls_conn);
                         return Err(error.cause);
                     }
                 }
@@ -567,42 +490,6 @@ pub(crate) struct State {
     stats: EndpointStats,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct JlsState {
-    upstream_connections: HashMap<SocketAddr, JlsForwardConnection>,
-}
-
-impl JlsState {
-    fn handle_jls_forward(&mut self, buf: &BytesMut, meta: &RecvMeta) -> bool {
-        let segment_size = if meta.stride < meta.len {
-            Some(meta.stride)
-        } else {
-            None
-        };
-        match self.upstream_connections.get_mut(&meta.addr) {
-            Some(conn) => {
-                let trans = Transmit {
-                    destination: conn.upstream_addr,
-                    ecn: meta.ecn.map(|x| EcnCodepoint::from_bits(x as u8).unwrap()),
-                    segment_size: segment_size,
-                    size: buf.len(),
-                    src_ip: None,
-                };
-                respond(trans, buf, &*conn.upstream_socket);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct JlsForwardConnection {
-    upstream_socket: Arc<dyn AsyncUdpSocket>,
-    upstream_addr: SocketAddr,
-    from_upstream: Box<[u8]>,
-    active_time: Instant,
-}
 
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -706,7 +593,7 @@ impl State {
                                 size: data.len(),
                             };
 
-                            respond(trans, data, &*self.socket);
+                            conn.recv_limiter.try_send(data, trans, &*self.socket, now);
                             trace!("recv from upstream: {:?} bytes", data.len());
                         }
                         conn.active_time = now;
@@ -936,7 +823,7 @@ struct RecvState {
     recv_limiter: WorkLimiter,
 
     /// JLS state
-    jls_state: JlsState,
+    jls_state: crate::jls::JlsState,
 }
 
 impl RecvState {
@@ -960,7 +847,8 @@ impl RecvState {
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
             recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
-            jls_state: JlsState::default(),
+            jls_state: crate::jls::JlsState::new(endpoint.server_config()
+            .and_then(|x|Some(x.crypto.jls_rate_limit())).unwrap_or_default()),
         }
     }
 
@@ -993,7 +881,7 @@ impl RecvState {
                         let mut data: BytesMut = buf[0..meta.len].into();
                         while !data.is_empty() {
                             let buf = data.split_to(meta.stride.min(data.len()));
-                            if self.jls_state.handle_jls_forward(&buf, meta) {
+                            if self.jls_state.handle_jls_forward(&buf, meta, now) {
                                 continue;
                             }
                             let mut response_buffer = Vec::new();
@@ -1032,7 +920,7 @@ impl RecvState {
                                     if let Some(upstream_addr) = endpoint.server_config()
                                     .and_then(|x|x.crypto.jls_upstream_addr())
                                      {
-                                        if let Err(e) = insert_forward_conn(
+                                        if let Err(e) = crate::jls::insert_forward_conn(
                                             &mut self.jls_state,
                                             runtime,
                                             vec![transmit],

@@ -548,6 +548,10 @@ impl crypto::ServerConfig for QuicServerConfig {
     fn jls_upstream_addr(&self) -> Option<String> {
         self.inner.jls_config.upstream_addr.clone()
     }
+    
+    fn jls_rate_limit(&self) -> u64 {
+        self.inner.jls_config.rate_limit
+    }
 }
 
 pub(crate) fn initial_suite_from_provider(
