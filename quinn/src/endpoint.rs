@@ -599,7 +599,7 @@ impl State {
                         conn.active_time = now;
                     }
                     Poll::Pending => {
-                        if now.duration_since(conn.active_time).as_secs() > 30 {
+                        if now.duration_since(conn.active_time).as_secs() > 60 * 2 {
                             to_remove.push(remote.clone());
                             //trace!("remove old forward connection from {:?}", remote);
                         }
@@ -617,9 +617,10 @@ impl State {
             }
         }
         // TODO remove old connections
-        // for k in to_remove.iter() {
-        //     upstream_conns.remove(k);
-        // }
+        for k in to_remove.iter() {
+            tracing::debug!("remove forward connection from {:?}", k);
+            upstream_conns.remove(k);
+        }
         if let Some(e) = last_err {
             Err(e)
         } else {
