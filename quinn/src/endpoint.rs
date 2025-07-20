@@ -921,16 +921,20 @@ impl RecvState {
                                     if let Some(upstream_addr) = endpoint.server_config()
                                     .and_then(|x|x.crypto.jls_upstream_addr())
                                      {
-                                        if let Err(e) = crate::jls::insert_forward_conn(
-                                            &mut self.jls_state,
-                                            runtime,
-                                            vec![transmit],
-                                            &response_buffer,
-                                            &upstream_addr,
-                                            meta.addr,
-                                            now,
-                                        ) {
-                                            tracing::error!("insert forward conn failed: {}", e);
+                                        // Some system may falsely trigger this after hibernation
+                                        // See https://github.com/spongebob888/shadowquic/issues/52
+                                        if !self.jls_state.upstream_connections.is_empty() {
+                                            if let Err(e) = crate::jls::insert_forward_conn(
+                                                &mut self.jls_state,
+                                                runtime,
+                                                vec![transmit],
+                                                &response_buffer,
+                                                &upstream_addr,
+                                                meta.addr,
+                                                now,
+                                            ) {
+                                                tracing::error!("insert forward conn failed: {}", e);
+                                            }
                                         }
                                     }
                                 }
