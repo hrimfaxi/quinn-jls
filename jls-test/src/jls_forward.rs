@@ -15,7 +15,7 @@ use quinn::{
 };
 use rcgen::CertifiedKey;
 use rustls::{
-    JlsConfig, JlsServerConfig,
+    jls::{JlsClientConfig, JlsServerConfig},
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use tracing::{Instrument, error, info, info_span};
@@ -92,7 +92,7 @@ async fn make_jls_server(resp: String, port: u16) -> Result<()> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())?;
-    server_crypto.jls_config = JlsServerConfig::new("123".into(), "123".into(), Some("localhost:4445".into()), None);
+    server_crypto.jls_config = JlsServerConfig::new("123".into(), "123".into(), Some("localhost:4445".into()), None).into();
     server_crypto.max_early_data_size = std::u32::MAX;
 
     let mut server_config =
@@ -226,7 +226,7 @@ fn jls_failed() {
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.enable_early_data = true;
-    client_crypto.jls_config = JlsConfig::new("12", "123");
+    client_crypto.jls_config = JlsClientConfig::new("12", "123");
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

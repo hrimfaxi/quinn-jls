@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use proto::crypto::rustls::QuicClientConfig;
-use rustls::{pki_types::CertificateDer, JlsConfig};
+use rustls::{pki_types::CertificateDer, jls::JlsClientConfig};
 use tracing::{error, info};
 use url::Url;
 
@@ -96,7 +96,7 @@ async fn run(options: Opt) -> Result<()> {
         .with_root_certificates(roots)
         .with_no_client_auth();
 
-    client_crypto.jls_config = JlsConfig::new("user_pwd", "user_iv");
+    client_crypto.jls_config = JlsClientConfig::new("user_pwd", "user_iv");
     client_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if options.keylog {
         client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());

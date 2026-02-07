@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use proto::crypto::rustls::QuicServerConfig;
-use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}, JlsServerConfig};
+use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}, jls::JlsServerConfig};
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
@@ -118,7 +118,7 @@ async fn run(options: Opt) -> Result<()> {
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     server_crypto.jls_config = JlsServerConfig::new("user_pwd".into(), "user_iv".into(),
-     options.upstream_addr, None);
+     options.upstream_addr, None).into();
     server_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if options.keylog {
         server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());

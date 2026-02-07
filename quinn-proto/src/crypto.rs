@@ -93,11 +93,19 @@ pub trait Session: Send + Sync + 'static {
     ) -> Result<(), ExportKeyingMaterialError>;
 
     /// return true if it's a authenticated JLS connection
-    fn is_jls(&self) -> Option<bool>;
+    fn is_jls(&self) -> Option<bool> {
+        unimplemented!()
+    }
 
+    /// Whether JLS is enabled for this connection.
+    fn is_jls_enabled(&self) -> bool {
+        unimplemented!()
+    }
     /// Return the jls forward upstream addr return None if not found or it's 
     /// authentic jls connection
-    fn jls_upstream_addr(&self) -> Option<String>;
+    fn jls_upstream_addr(&self) -> Option<String> {
+        unimplemented!()
+    }
 }
 
 /// A pair of keys for bidirectional communication
@@ -150,9 +158,13 @@ pub trait ServerConfig: Send + Sync {
         params: &TransportParameters,
     ) -> Box<dyn Session>;
     /// get jls upstream addr
-    fn jls_upstream_addr(&self) -> Option<String>;
+    fn jls_upstream_addr(&self) -> Option<String> {
+        unimplemented!()
+    }
     /// rate limit for jls in unit of bps
-    fn jls_rate_limit(&self) -> u64;
+    fn jls_rate_limit(&self) -> u64 {
+        unimplemented!()
+    }
 }
 
 /// Keys used to protect packet payloads

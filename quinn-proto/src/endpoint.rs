@@ -656,7 +656,8 @@ impl Endpoint {
                 // JLS Check
                 // This requires the client hello must be fully received in the first packet
                 // Or the connection will be forwarded
-                if conn.crypto_session().is_jls() != Some(true) {
+                if conn.crypto_session().is_jls_enabled() && 
+                conn.crypto_session().is_jls() != Some(true) {
                     debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);

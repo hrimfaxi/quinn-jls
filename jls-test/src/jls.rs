@@ -14,7 +14,7 @@ use quinn::{
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::{
-    JlsConfig, JlsServerConfig,
+    jls::{JlsClientConfig, JlsServerConfig},
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use tracing::{Instrument, error, info, info_span};
@@ -91,7 +91,7 @@ async fn make_server(resp: String, port: u16) -> Result<()> {
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())?;
     server_crypto.jls_config = JlsServerConfig::new("123".into(), "123".into(), 
-    Some("codepen.io:443".into()), None);
+    Some("codepen.io:443".into()), None).into();
     server_crypto.max_early_data_size = std::u32::MAX;
 
     let mut server_config =
@@ -195,7 +195,7 @@ fn jls_success() {
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.enable_early_data = true;
-    client_crypto.jls_config = JlsConfig::new("123", "123");
+    client_crypto.jls_config = JlsClientConfig::new("123", "123");
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
