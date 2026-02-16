@@ -202,15 +202,15 @@ impl crypto::Session for TlsSession {
 
     fn is_jls(&self) -> Option<bool> {
         match self.inner.jls_authed {
-            rustls::jls::JlsState::AuthFailed => Some(false),
-            rustls::jls::JlsState::AuthSuccess => Some(true),
+            rustls::jls::JlsState::AuthFailed(_) => Some(false),
+            rustls::jls::JlsState::AuthSuccess(_) => Some(true),
             rustls::jls::JlsState::NotAuthed | rustls::jls::JlsState::Disabled => None,
 
         }
     }
 
     fn is_jls_enabled(&self) -> bool {
-       self.inner.jls_authed != rustls::jls::JlsState::Disabled
+       !matches!(self.inner.jls_authed, rustls::jls::JlsState::Disabled)
     }
 
     fn jls_upstream_addr(&self) -> Option<String> {
