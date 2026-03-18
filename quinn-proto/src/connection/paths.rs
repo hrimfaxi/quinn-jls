@@ -52,10 +52,11 @@ impl PathData {
         now: Instant,
         config: &TransportConfig,
     ) -> Self {
-        let congestion = config
-            .congestion_controller_factory
-            .clone()
-            .build(now, config.get_initial_mtu());
+        let congestion = config.congestion_controller_factory.clone().build(
+            now,
+            config.get_initial_mtu(),
+            &remote,
+        );
         Self {
             remote,
             rtt: RttEstimator::new(config.initial_rtt),
@@ -119,10 +120,11 @@ impl PathData {
     /// This is useful when it is known the underlying path has changed.
     pub(super) fn reset(&mut self, now: Instant, config: &TransportConfig) {
         self.rtt = RttEstimator::new(config.initial_rtt);
-        self.congestion = config
-            .congestion_controller_factory
-            .clone()
-            .build(now, config.get_initial_mtu());
+        self.congestion = config.congestion_controller_factory.clone().build(
+            now,
+            config.get_initial_mtu(),
+            &self.remote,
+        );
         self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
     }
 

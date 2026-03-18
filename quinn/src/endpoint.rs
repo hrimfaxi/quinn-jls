@@ -8,7 +8,8 @@ use std::{
     pin::Pin,
     str,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker}, vec,
+    task::{Context, Poll, Waker},
+    vec,
 };
 
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))]
@@ -21,12 +22,16 @@ use crate::{
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use proto::{
-    self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent, EcnCodepoint, EndpointEvent, ServerConfig, Transmit
+    self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent,
+    EcnCodepoint, EndpointEvent, ServerConfig, Transmit,
 };
 use rustc_hash::FxHashMap;
 #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring"),))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::{runtime, sync::{futures::Notified, mpsc, watch::error, Notify}};
+use tokio::{
+    runtime,
+    sync::{Notify, futures::Notified, mpsc, watch::error},
+};
 use tracing::{Instrument, Span};
 use udp::{BATCH_SIZE, RecvMeta};
 
@@ -434,10 +439,15 @@ impl EndpointInner {
                 if let ConnectionError::JlsAuthFailed(inner) = &error.cause {
                     if let Some(upstream_addr) = &inner.upstream_addr {
                         let runtime = state.runtime.clone();
-                        crate::jls::insert_forward_conn(&mut state.recv_state.jls_state,
-                             &*runtime,
-                             error.response, &response_buffer, 
-                             upstream_addr, remote_addr, now)?;
+                        crate::jls::insert_forward_conn(
+                            &mut state.recv_state.jls_state,
+                            &*runtime,
+                            error.response,
+                            &response_buffer,
+                            upstream_addr,
+                            remote_addr,
+                            now,
+                        )?;
                     }
                     return Err(error.cause);
                 }
@@ -489,7 +499,6 @@ pub(crate) struct State {
     runtime: Arc<dyn Runtime>,
     stats: EndpointStats,
 }
-
 
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -670,7 +679,6 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
     }
 }
 
-
 #[derive(Debug)]
 struct ConnectionSet {
     /// Senders for communicating with the endpoint's connections
@@ -848,8 +856,12 @@ impl RecvState {
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
             recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
-            jls_state: crate::jls::JlsState::new(endpoint.server_config()
-            .and_then(|x|Some(x.crypto.jls_rate_limit())).unwrap_or_default()),
+            jls_state: crate::jls::JlsState::new(
+                endpoint
+                    .server_config()
+                    .and_then(|x| Some(x.crypto.jls_rate_limit()))
+                    .unwrap_or_default(),
+            ),
         }
     }
 
@@ -918,9 +930,10 @@ impl RecvState {
                                 }
                                 Some(DatagramEvent::JlsUpstreamMigrate(transmit)) => {
                                     // JLS forward connection
-                                    if let Some(upstream_addr) = endpoint.server_config()
-                                    .and_then(|x|x.crypto.jls_upstream_addr())
-                                     {
+                                    if let Some(upstream_addr) = endpoint
+                                        .server_config()
+                                        .and_then(|x| x.crypto.jls_upstream_addr())
+                                    {
                                         // Some system may falsely trigger this after hibernation
                                         // See https://github.com/spongebob888/shadowquic/issues/52
                                         if !self.jls_state.upstream_connections.is_empty() {
@@ -933,7 +946,10 @@ impl RecvState {
                                                 meta.addr,
                                                 now,
                                             ) {
-                                                tracing::error!("insert forward conn failed: {}", e);
+                                                tracing::error!(
+                                                    "insert forward conn failed: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }

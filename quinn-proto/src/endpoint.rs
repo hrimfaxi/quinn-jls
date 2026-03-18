@@ -15,12 +15,24 @@ use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    cid_generator::ConnectionIdGenerator, coding::BufMutExt, config::{ClientConfig, EndpointConfig, ServerConfig}, connection::{Connection, ConnectionError, JlsAuthInner, SideArgs}, crypto::{self, Keys, UnsupportedVersion}, frame, packet::{
-        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, Packet, PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader
-    }, shared::{
+    Duration, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken,
+    Side, Transmit, TransportConfig, TransportError,
+    cid_generator::ConnectionIdGenerator,
+    coding::BufMutExt,
+    config::{ClientConfig, EndpointConfig, ServerConfig},
+    connection::{Connection, ConnectionError, JlsAuthInner, SideArgs},
+    crypto::{self, Keys, UnsupportedVersion},
+    frame,
+    packet::{
+        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, Packet,
+        PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader,
+    },
+    shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
+    },
+    token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload},
+    transport_parameters::{PreferredAddress, TransportParameters},
 };
 
 /// The main entry point to the library
@@ -236,7 +248,6 @@ impl Endpoint {
             // connection. Send a stateless reset if possible.
 
             warn!("dropping packet with invalid CID");
-            
 
             buf.extend_from_slice(event.first_decode.data());
             buf.extend_from_slice(event.remaining.unwrap_or_default().as_ref());
@@ -656,8 +667,9 @@ impl Endpoint {
                 // JLS Check
                 // This requires the client hello must be fully received in the first packet
                 // Or the connection will be forwarded
-                if conn.crypto_session().is_jls_enabled() && 
-                conn.crypto_session().is_jls() != Some(true) {
+                if conn.crypto_session().is_jls_enabled()
+                    && conn.crypto_session().is_jls() != Some(true)
+                {
                     debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);

@@ -205,19 +205,18 @@ impl crypto::Session for TlsSession {
             rustls::jls::JlsState::AuthFailed => Some(false),
             rustls::jls::JlsState::AuthSuccess => Some(true),
             rustls::jls::JlsState::NotAuthed | rustls::jls::JlsState::Disabled => None,
-
         }
     }
 
     fn is_jls_enabled(&self) -> bool {
-       self.inner.jls_authed != rustls::jls::JlsState::Disabled
+        self.inner.jls_authed != rustls::jls::JlsState::Disabled
     }
 
     fn jls_upstream_addr(&self) -> Option<String> {
         match &self.inner {
             Connection::Server(conn) => {
                 return conn.get_upstream_addr();
-            },
+            }
             Connection::Client(_) => {
                 panic!("tls client doesn't implement upstream addr");
             }
@@ -557,7 +556,7 @@ impl crypto::ServerConfig for QuicServerConfig {
     fn jls_upstream_addr(&self) -> Option<String> {
         self.inner.jls_config.upstream_addr.clone()
     }
-    
+
     fn jls_rate_limit(&self) -> u64 {
         self.inner.jls_config.rate_limit
     }

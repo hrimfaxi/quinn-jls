@@ -92,7 +92,13 @@ async fn make_jls_server(resp: String, port: u16) -> Result<()> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())?;
-    server_crypto.jls_config = JlsServerConfig::new("123".into(), "123".into(), Some("localhost:4445".into()), None).into();
+    server_crypto.jls_config = JlsServerConfig::new(
+        "123".into(),
+        "123".into(),
+        Some("localhost:4445".into()),
+        None,
+    )
+    .into();
     server_crypto.max_early_data_size = std::u32::MAX;
 
     let mut server_config =

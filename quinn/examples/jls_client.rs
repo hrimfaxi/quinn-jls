@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use proto::crypto::rustls::QuicClientConfig;
-use rustls::{pki_types::CertificateDer, jls::JlsClientConfig};
+use rustls::{jls::JlsClientConfig, pki_types::CertificateDer};
 use tracing::{error, info};
 use url::Url;
 
