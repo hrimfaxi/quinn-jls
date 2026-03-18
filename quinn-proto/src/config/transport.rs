@@ -43,6 +43,8 @@ pub struct TransportConfig {
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
     pub(crate) enable_segmentation_offload: bool,
+
+    pub(crate) brutal_bandwidth_hint: Option<u64>,
 }
 
 impl TransportConfig {
@@ -271,6 +273,14 @@ impl TransportConfig {
         self
     }
 
+    /// Sets the local receive bandwidth capacity advertised to the peer, in bits per second.
+    ///
+    /// Used by the peer to configure its Brutal congestion controller sending rate.
+    pub fn brutal_bandwidth_hint(&mut self, value: u64) -> &mut Self {
+        self.brutal_bandwidth_hint = Some(value);
+        self
+    }
+
     /// Whether to force every packet number to be used
     ///
     /// By default, packet numbers are occasionally skipped to ensure peers aren't ACKing packets
@@ -354,6 +364,8 @@ impl Default for TransportConfig {
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
             enable_segmentation_offload: true,
+
+            brutal_bandwidth_hint: None,
         }
     }
 }
@@ -385,6 +397,7 @@ impl fmt::Debug for TransportConfig {
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
             enable_segmentation_offload,
+            brutal_bandwidth_hint,
         } = self;
         fmt.debug_struct("TransportConfig")
             .field("max_concurrent_bidi_streams", max_concurrent_bidi_streams)
@@ -412,6 +425,7 @@ impl fmt::Debug for TransportConfig {
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload)
+            .field("brutal_bandwidth_hint", brutal_bandwidth_hint)
             .finish_non_exhaustive()
     }
 }

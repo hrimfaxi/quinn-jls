@@ -110,6 +110,9 @@ macro_rules! make_struct {
             /// This field is initialized only for outgoing `TransportParameters` instances and
             /// is set to `None` for `TransportParameters` received from a peer.
             pub(crate) write_order: Option<[u8; TransportParameterId::SUPPORTED.len()]>,
+
+            /// Define brutal bandwidth hint in bitrate
+            pub(crate) brutal_bandwidth_hint: Option<VarInt>,
         }
 
         // We deliberately don't implement the `Default` trait, since that would be public, and
@@ -133,6 +136,8 @@ macro_rules! make_struct {
                     preferred_address: None,
                     grease_transport_parameter: None,
                     write_order: None,
+
+                    brutal_bandwidth_hint: None,
                 }
             }
         }
@@ -151,6 +156,9 @@ impl TransportParameters {
         rng: &mut impl RngCore,
     ) -> Self {
         Self {
+            brutal_bandwidth_hint: config.brutal_bandwidth_hint.map(|x| {
+                VarInt::from_u64(x).expect("brutal bandwidth hint exceeds QUIC varint range")
+            }),
             initial_src_cid: Some(initial_src_cid),
             initial_max_streams_bidi: config.max_concurrent_bidi_streams,
             initial_max_streams_uni: config.max_concurrent_uni_streams,
@@ -380,6 +388,13 @@ impl TransportParameters {
                         w.write(x);
                     }
                 }
+                TransportParameterId::BrutalBandwidthHint => {
+                    if let Some(x) = self.brutal_bandwidth_hint {
+                        w.write_var(id as u64);
+                        w.write_var(x.size() as u64);
+                        w.write(x);
+                    }
+                }
                 id => {
                     macro_rules! write_params {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
@@ -477,6 +492,9 @@ impl TransportParameters {
                 },
                 TransportParameterId::MinAckDelayDraft07 => {
                     params.min_ack_delay = Some(r.get().unwrap())
+                }
+                TransportParameterId::BrutalBandwidthHint => {
+                    params.brutal_bandwidth_hint = Some(r.get().unwrap())
                 }
                 _ => {
                     macro_rules! parse {
@@ -638,13 +656,17 @@ pub(crate) enum TransportParameterId {
     // https://www.rfc-editor.org/rfc/rfc9287.html#section-3
     GreaseQuicBit = 0x2AB2,
 
+    /// Brutal bandwidth hint (client → server, bits per second).
+    /// Only sent when Brutal enabled; omitted otherwise to avoid fingerprinting.
+    BrutalBandwidthHint = 0x173e01,
+
     // https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency#section-10.1
     MinAckDelayDraft07 = 0xFF04DE1B,
 }
 
 impl TransportParameterId {
     /// Array with all supported transport parameter IDs
-    const SUPPORTED: [Self; 21] = [
+    const SUPPORTED: [Self; 22] = [
         Self::MaxIdleTimeout,
         Self::MaxUdpPayloadSize,
         Self::InitialMaxData,
@@ -666,6 +688,7 @@ impl TransportParameterId {
         Self::RetrySourceConnectionId,
         Self::GreaseQuicBit,
         Self::MinAckDelayDraft07,
+        Self::BrutalBandwidthHint,
     ];
 }
 
@@ -705,6 +728,7 @@ impl TryFrom<u64> for TransportParameterId {
             id if Self::RetrySourceConnectionId == id => Self::RetrySourceConnectionId,
             id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
             id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
+            id if Self::BrutalBandwidthHint == id => Self::BrutalBandwidthHint,
             _ => return Err(()),
         };
         Ok(param)
