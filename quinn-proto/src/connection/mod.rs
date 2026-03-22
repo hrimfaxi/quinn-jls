@@ -12,6 +12,7 @@ use frame::StreamMetaVec;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
+use crate::congestion::CongestionParameter::PeerBandwidthHint;
 
 use crate::{
     Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
@@ -3427,6 +3428,11 @@ impl Connection {
         self.path.mtud.on_peer_max_udp_payload_size_received(
             u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
         );
+        if let Some(brutal_bandwidth_hint) = params.brutal_bandwidth_hint.map(|x| x.into_inner()) {
+            self.path
+                .congestion
+                .set_parameter(PeerBandwidthHint(brutal_bandwidth_hint));
+        }
     }
 
     fn decrypt_packet(
