@@ -37,18 +37,27 @@ mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
 
+#[cfg(feature = "bloom")]
+mod bloom_token_log;
+#[cfg(feature = "bloom")]
+pub use bloom_token_log::BloomTokenLog;
+
 mod connection;
 pub use crate::connection::{
-    BytesSource, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats,
-    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
-    RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats,
-    WriteError, Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Datagrams, Event,
+    FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream, RttEstimator,
+    SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError,
+    Written,
 };
+#[cfg(feature = "qlog")]
+pub use connection::qlog::QlogStream;
 
 #[cfg(feature = "rustls")]
 pub use rustls;
 
 mod config;
+#[cfg(feature = "qlog")]
+pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
     ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
@@ -87,6 +96,9 @@ pub use crate::cid_generator::{
 mod token;
 use token::ResetToken;
 pub use token::{NoneTokenLog, NoneTokenStore, TokenLog, TokenReuseError, TokenStore};
+
+mod token_memory_cache;
+pub use token_memory_cache::TokenMemoryCache;
 
 #[cfg(feature = "arbitrary")]
 use arbitrary::Arbitrary;

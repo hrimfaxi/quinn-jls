@@ -252,6 +252,8 @@ impl Endpoint {
             trace!("dropping unrecognized short packet without ID");
             None
         } else {
+            // If we got this far, we're receiving a seemingly valid packet for an unknown
+            // connection. Send a stateless reset if possible.
             self.stateless_reset(now, datagram_len, addresses, *dst_cid, buf)
                 .map(DatagramEvent::Response)
         }
@@ -401,7 +403,7 @@ impl Endpoint {
     fn new_cid(&mut self, ch: ConnectionHandle) -> ConnectionId {
         loop {
             let cid = self.local_cid_generator.generate_cid();
-            if cid.len() == 0 {
+            if cid.is_empty() {
                 // Zero-length CID; nothing to track
                 debug_assert_eq!(self.local_cid_generator.cid_len(), 0);
                 return cid;
@@ -515,6 +517,8 @@ impl Endpoint {
     }
 
     /// Attempt to accept this incoming connection (an error may still occur)
+    // AcceptError cannot be made smaller without semver breakage
+    #[allow(clippy::result_large_err)]
     pub fn accept(
         &mut self,
         mut incoming: Incoming,
@@ -603,9 +607,7 @@ impl Endpoint {
         params.original_dst_cid = Some(incoming.token.orig_dst_cid);
         params.retry_src_cid = incoming.token.retry_src_cid;
         let mut pref_addr_cid = None;
-        if server_config.preferred_address_v4.is_some()
-            || server_config.preferred_address_v6.is_some()
-        {
+        if server_config.has_preferred_address() {
             let cid = self.new_cid(ch);
             pref_addr_cid = Some(cid);
             params.preferred_address = Some(PreferredAddress {
@@ -774,7 +776,7 @@ impl Endpoint {
     /// Errors if `incoming.may_retry()` is false.
     pub fn retry(&mut self, incoming: Incoming, buf: &mut Vec<u8>) -> Result<Transmit, RetryError> {
         if !incoming.may_retry() {
-            return Err(RetryError(incoming));
+            return Err(RetryError(Box::new(incoming)));
         }
 
         self.clean_up_incoming(&incoming);
@@ -1054,7 +1056,7 @@ struct ConnectionIndex {
 impl ConnectionIndex {
     /// Associate an incoming connection with its initial destination CID
     fn insert_initial_incoming(&mut self, dst_cid: ConnectionId, incoming_key: usize) {
-        if dst_cid.len() == 0 {
+        if dst_cid.is_empty() {
             return;
         }
         self.connection_ids_initial
@@ -1063,7 +1065,7 @@ impl ConnectionIndex {
 
     /// Remove an association with an initial destination CID
     fn remove_initial(&mut self, dst_cid: ConnectionId) {
-        if dst_cid.len() == 0 {
+        if dst_cid.is_empty() {
             return;
         }
         let removed = self.connection_ids_initial.remove(&dst_cid);
@@ -1072,7 +1074,7 @@ impl ConnectionIndex {
 
     /// Associate a connection with its initial destination CID
     fn insert_initial(&mut self, dst_cid: ConnectionId, connection: ConnectionHandle) {
-        if dst_cid.len() == 0 {
+        if dst_cid.is_empty() {
             return;
         }
         self.connection_ids_initial
@@ -1128,7 +1130,7 @@ impl ConnectionIndex {
 
     /// Find the existing connection that `datagram` should be routed to, if any
     fn get(&self, addresses: &FourTuple, datagram: &PartialDecode) -> Option<RouteDatagramTo> {
-        if datagram.dst_cid().len() != 0 {
+        if !datagram.dst_cid().is_empty() {
             if let Some(&ch) = self.connection_ids.get(datagram.dst_cid()) {
                 return Some(RouteDatagramTo::Connection(ch));
             }
@@ -1138,7 +1140,7 @@ impl ConnectionIndex {
                 return Some(ch);
             }
         }
-        if datagram.dst_cid().len() == 0 {
+        if datagram.dst_cid().is_empty() {
             if let Some(&ch) = self.incoming_connection_remotes.get(addresses) {
                 return Some(RouteDatagramTo::Connection(ch));
             }
@@ -1339,12 +1341,12 @@ pub struct AcceptError {
 /// Error for attempting to retry an [`Incoming`] which already bears a token from a previous retry
 #[derive(Debug, Error)]
 #[error("retry() with validated Incoming")]
-pub struct RetryError(Incoming);
+pub struct RetryError(Box<Incoming>);
 
 impl RetryError {
     /// Get the [`Incoming`]
     pub fn into_incoming(self) -> Incoming {
-        self.0
+        *self.0
     }
 }
 

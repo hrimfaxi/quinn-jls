@@ -225,7 +225,7 @@ impl Pair {
         );
         assert_matches!(
             self.client_conn_mut(client_ch).poll(),
-            Some(Event::Connected { .. })
+            Some(Event::Connected)
         );
         assert_matches!(
             self.server_conn_mut(server_ch).poll(),
@@ -233,7 +233,7 @@ impl Pair {
         );
         assert_matches!(
             self.server_conn_mut(server_ch).poll(),
-            Some(Event::Connected { .. })
+            Some(Event::Connected)
         );
     }
 
@@ -562,10 +562,12 @@ impl Write for TestWriter {
 
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
-    config
-        .validation_token
-        .sent(2)
-        .log(Arc::new(SimpleTokenLog::default()));
+    if !cfg!(feature = "bloom") {
+        config
+            .validation_token
+            .sent(2)
+            .log(Arc::new(SimpleTokenLog::default()));
+    }
     config
 }
 
@@ -603,7 +605,7 @@ fn server_crypto_inner(
     let (cert, key) = identity.unwrap_or_else(|| {
         (
             CERTIFIED_KEY.cert.der().clone(),
-            PrivateKeyDer::Pkcs8(CERTIFIED_KEY.key_pair.serialize_der().into()),
+            PrivateKeyDer::Pkcs8(CERTIFIED_KEY.signing_key.serialize_der().into()),
         )
     });
 
@@ -616,9 +618,7 @@ fn server_crypto_inner(
 }
 
 pub(super) fn client_config() -> ClientConfig {
-    let mut config = ClientConfig::new(Arc::new(client_crypto()));
-    config.token_store(Arc::new(SimpleTokenStore::default()));
-    config
+    ClientConfig::new(Arc::new(client_crypto()))
 }
 
 pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
@@ -723,7 +723,7 @@ fn set_congestion_experienced(
 lazy_static! {
     pub static ref SERVER_PORTS: Mutex<RangeFrom<u16>> = Mutex::new(4433..);
     pub static ref CLIENT_PORTS: Mutex<RangeFrom<u16>> = Mutex::new(44433..);
-    pub(crate) static ref CERTIFIED_KEY: rcgen::CertifiedKey =
+    pub(crate) static ref CERTIFIED_KEY: rcgen::CertifiedKey<rcgen::KeyPair> =
         rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 }
 
@@ -742,27 +742,5 @@ impl TokenLog for SimpleTokenLog {
         } else {
             Err(TokenReuseError)
         }
-    }
-}
-
-#[derive(Default)]
-struct SimpleTokenStore(Mutex<HashMap<String, VecDeque<Bytes>>>);
-
-impl TokenStore for SimpleTokenStore {
-    fn insert(&self, server_name: &str, token: Bytes) {
-        self.0
-            .lock()
-            .unwrap()
-            .entry(server_name.into())
-            .or_default()
-            .push_back(token);
-    }
-
-    fn take(&self, server_name: &str) -> Option<Bytes> {
-        self.0
-            .lock()
-            .unwrap()
-            .get_mut(server_name)
-            .and_then(|queue| queue.pop_front())
     }
 }

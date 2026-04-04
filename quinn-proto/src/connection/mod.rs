@@ -9,6 +9,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
+
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
@@ -22,7 +23,7 @@ use crate::{
     coding::BufMutExt,
     config::{ServerConfig, TransportConfig},
     crypto::{self, KeyPair, Keys, PacketKey},
-    frame::{self, Close, Datagram, FrameStruct, NewToken},
+    frame::{self, Close, Datagram, FrameStruct, NewConnectionId, NewToken},
     packet::{
         FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, LongType, Packet,
         PacketNumber, PartialDecode, SpaceId,
@@ -62,6 +63,8 @@ mod paths;
 pub use paths::RttEstimator;
 use paths::{PathData, PathResponses};
 
+pub(crate) mod qlog;
+
 mod send_buffer;
 
 mod spaces;
@@ -80,8 +83,8 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    BytesSource, Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream,
-    SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
+    ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
 mod timer;
@@ -140,6 +143,10 @@ pub struct Connection {
     /// This is only populated for the server case, and if known
     local_ip: Option<IpAddr>,
     path: PathData,
+    /// Incremented every time we see a new path
+    ///
+    /// Stored separately from `path.generation` to account for aborted migrations
+    path_counter: u64,
     /// Whether MTU detection is supported in this environment
     allow_mtud: bool,
     prev_path: Option<(ConnectionId, PathData)>,
@@ -161,8 +168,6 @@ pub struct Connection {
     /// The value that the server included in the Source Connection ID field of a Retry packet, if
     /// one was received
     retry_src_cid: Option<ConnectionId>,
-    /// Total number of outgoing packets that have been deemed lost
-    lost_packets: u64,
     events: VecDeque<Event>,
     endpoint_events: VecDeque<EndpointEventInner>,
     /// Whether the spin bit is in use for this connection
@@ -277,7 +282,8 @@ impl Connection {
                 now,
                 if pref_addr_cid.is_some() { 2 } else { 1 },
             ),
-            path: PathData::new(remote, allow_mtud, None, now, &config),
+            path: PathData::new(remote, allow_mtud, None, 0, now, &config),
+            path_counter: 0,
             allow_mtud,
             local_ip,
             prev_path: None,
@@ -297,7 +303,6 @@ impl Connection {
             orig_rem_cid: rem_cid,
             initial_dst_cid: init_cid,
             retry_src_cid: None,
-            lost_packets: 0,
             events: VecDeque::new(),
             endpoint_events: VecDeque::new(),
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
@@ -453,7 +458,7 @@ impl Connection {
         assert!(max_datagrams != 0);
         let max_datagrams = match self.config.enable_segmentation_offload {
             false => 1,
-            true => max_datagrams.min(MAX_TRANSMIT_SEGMENTS),
+            true => max_datagrams,
         };
 
         let mut num_datagrams = 0;
@@ -470,11 +475,7 @@ impl Connection {
         for space in SpaceId::iter() {
             let request_immediate_ack =
                 space == SpaceId::Data && self.peer_supports_ack_frequency();
-            self.spaces[space].maybe_queue_probe(
-                request_immediate_ack,
-                &self.streams,
-                &self.datagrams,
-            );
+            self.spaces[space].maybe_queue_probe(request_immediate_ack, &self.streams);
         }
 
         // Check whether we need to send a close message
@@ -513,6 +514,7 @@ impl Connection {
         let mut builder_storage: Option<PacketBuilder> = None;
         let mut sent_frames = None;
         let mut pad_datagram = false;
+        let mut pad_datagram_to_mtu = false;
         let mut congestion_blocked = false;
 
         // Iterate over all spaces and find data to send
@@ -546,6 +548,8 @@ impl Connection {
                 ack_eliciting |= self.can_send_1rtt(frame_space_1rtt);
             }
 
+            pad_datagram_to_mtu |= space_id == SpaceId::Data && self.config.pad_to_mtu;
+
             // Can we append more data into the current buffer?
             // It is not safe to assume that `buf.len()` is the end of the data,
             // since the last packet might not have been finished.
@@ -568,7 +572,7 @@ impl Connection {
                 // We need to send 1 more datagram and extend the buffer for that.
 
                 // Is 1 more datagram allowed?
-                if buf_capacity >= segment_size * max_datagrams {
+                if num_datagrams >= max_datagrams {
                     // No more datagrams allowed
                     break;
                 }
@@ -581,7 +585,7 @@ impl Connection {
                 // (see https://github.com/quinn-rs/quinn/issues/1082)
                 if self
                     .path
-                    .anti_amplification_blocked(segment_size as u64 * num_datagrams + 1)
+                    .anti_amplification_blocked(segment_size as u64 * (num_datagrams as u64) + 1)
                 {
                     trace!("blocked by anti-amplification");
                     break;
@@ -632,7 +636,7 @@ impl Connection {
                         builder.pad_to(MIN_INITIAL_SIZE);
                     }
 
-                    if num_datagrams > 1 {
+                    if num_datagrams > 1 || pad_datagram_to_mtu {
                         // If too many padding bytes would be required to continue the GSO batch
                         // after this packet, end the GSO batch here. Ensures that fixed-size frames
                         // with heterogeneous sizes (e.g. application datagrams) won't inadvertently
@@ -649,7 +653,8 @@ impl Connection {
                         let packet_len_unpadded = cmp::max(builder.min_size, buf.len())
                             - datagram_start
                             + builder.tag_len;
-                        if packet_len_unpadded + MAX_PADDING < segment_size
+                        if (packet_len_unpadded + MAX_PADDING < segment_size
+                            && !pad_datagram_to_mtu)
                             || datagram_start + segment_size > buf_capacity
                         {
                             trace!(
@@ -703,7 +708,7 @@ impl Connection {
                         // Clamp the datagram to at most the minimum MTU to ensure that loss probes
                         // can get through and enable recovery even if the path MTU has shrank
                         // unexpectedly.
-                        usize::from(INITIAL_MTU)
+                        std::cmp::min(segment_size, usize::from(INITIAL_MTU))
                     }
                 };
                 buf_capacity += next_datagram_size_limit;
@@ -908,11 +913,28 @@ impl Connection {
             if pad_datagram {
                 builder.pad_to(MIN_INITIAL_SIZE);
             }
+
+            // If this datagram is a loss probe and `segment_size` is larger than `INITIAL_MTU`,
+            // then padding it to `segment_size` would risk failure to recover from a reduction in
+            // path MTU.
+            // Loss probes are the only packets for which we might grow `buf_capacity`
+            // by less than `segment_size`.
+            if pad_datagram_to_mtu && buf_capacity >= datagram_start + segment_size {
+                builder.pad_to(segment_size as u16);
+            }
+
             let last_packet_number = builder.exact_number;
             builder.finish_and_track(now, self, sent_frames, buf);
             self.path
                 .congestion
                 .on_sent(now, buf.len() as u64, last_packet_number);
+
+            self.config.qlog_sink.emit_recovery_metrics(
+                self.pto_count,
+                &mut self.path,
+                now,
+                self.orig_rem_cid,
+            );
         }
 
         self.app_limited = buf.is_empty() && !congestion_blocked;
@@ -969,7 +991,7 @@ impl Connection {
         trace!("sending {} bytes in {} datagrams", buf.len(), num_datagrams);
         self.path.total_sent = self.path.total_sent.saturating_add(buf.len() as u64);
 
-        self.stats.udp_tx.on_sent(num_datagrams, buf.len());
+        self.stats.udp_tx.on_sent(num_datagrams as u64, buf.len());
 
         Some(Transmit {
             destination: self.path.remote,
@@ -1033,7 +1055,7 @@ impl Connection {
         // sending a datagram of this size
         builder.pad_to(MIN_INITIAL_SIZE);
 
-        builder.finish(self, buf);
+        builder.finish(self, now, buf);
         self.stats.udp_tx.on_sent(1, buf.len());
 
         Some(Transmit {
@@ -1103,6 +1125,13 @@ impl Connection {
                     self.handle_coalesced(now, remote, ecn, data);
                 }
 
+                self.config.qlog_sink.emit_recovery_metrics(
+                    self.pto_count,
+                    &mut self.path,
+                    now,
+                    self.orig_rem_cid,
+                );
+
                 if was_anti_amplification_blocked {
                     // A prior attempt to set the loss detection timer may have failed due to
                     // anti-amplification, so ensure it's set now. Prevents a handshake deadlock if
@@ -1157,6 +1186,13 @@ impl Connection {
                 }
                 Timer::LossDetection => {
                     self.on_loss_detection_timeout(now);
+
+                    self.config.qlog_sink.emit_recovery_metrics(
+                        self.pto_count,
+                        &mut self.path,
+                        now,
+                        self.orig_rem_cid,
+                    );
                 }
                 Timer::KeyDiscard => {
                     self.zero_rtt_crypto = None;
@@ -1248,6 +1284,16 @@ impl Connection {
     ///
     /// This can be useful for testing key updates, as they otherwise only happen infrequently.
     pub fn force_key_update(&mut self) {
+        if !self.state.is_established() {
+            debug!("ignoring forced key update in illegal state");
+            return;
+        }
+        if self.prev_crypto.is_some() {
+            // We already just updated, or are currently updating, the keys. Concurrent key updates
+            // are illegal.
+            debug!("ignoring redundant forced key update");
+            return;
+        }
         self.update_keys(None, false);
     }
 
@@ -1375,6 +1421,11 @@ impl Connection {
         self.streams.max_concurrent(dir)
     }
 
+    /// See [`TransportConfig::send_window()`]
+    pub fn set_send_window(&mut self, send_window: u64) {
+        self.streams.set_send_window(send_window);
+    }
+
     /// See [`TransportConfig::receive_window()`]
     pub fn set_receive_window(&mut self, receive_window: VarInt) {
         if self.streams.set_receive_window(receive_window) {
@@ -1447,7 +1498,7 @@ impl Connection {
                 // Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
                 self.ack_frequency.on_acked(packet);
 
-                self.on_packet_acked(now, packet, info);
+                self.on_packet_acked(now, info);
             }
         }
 
@@ -1533,8 +1584,8 @@ impl Connection {
 
     // Not timing-aware, so it's safe to call this for inferred acks, such as arise from
     // high-latency handshakes
-    fn on_packet_acked(&mut self, now: Instant, pn: u64, info: SentPacket) {
-        self.remove_in_flight(pn, &info);
+    fn on_packet_acked(&mut self, now: Instant, info: SentPacket) {
+        self.remove_in_flight(&info);
         if info.ack_eliciting && self.path.challenge.is_none() {
             // Only pass ACKs to the congestion controller if we are not validating the current
             // path, so as to ignore any ACKs from older paths still coming in.
@@ -1688,7 +1739,6 @@ impl Connection {
         if let Some(largest_lost) = lost_packets.last().cloned() {
             let old_bytes_in_flight = self.path.in_flight.bytes;
             let largest_lost_sent = self.spaces[pn_space].sent_packets[&largest_lost].time_sent;
-            self.lost_packets += lost_packets.len() as u64;
             self.stats.path.lost_packets += lost_packets.len() as u64;
             self.stats.path.lost_bytes += size_of_lost_packets;
             trace!(
@@ -1698,7 +1748,15 @@ impl Connection {
 
             for &packet in &lost_packets {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
-                self.remove_in_flight(packet, &info);
+                self.config.qlog_sink.emit_packet_lost(
+                    packet,
+                    &info,
+                    lost_send_time,
+                    pn_space,
+                    now,
+                    self.orig_rem_cid,
+                );
+                self.remove_in_flight(&info);
                 for frame in info.stream_frames {
                     self.streams.retransmit(frame);
                 }
@@ -1733,7 +1791,7 @@ impl Connection {
         // Handle a lost MTU probe
         if let Some(packet) = lost_mtu_probe {
             let info = self.spaces[SpaceId::Data].take(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
-            self.remove_in_flight(packet, &info);
+            self.remove_in_flight(&info);
             self.path.mtud.on_probe_lost();
             self.stats.path.lost_plpmtud_probes += 1;
         }
@@ -1760,7 +1818,7 @@ impl Connection {
 
         let mut result = None;
         for space in SpaceId::iter() {
-            if self.spaces[space].in_flight == 0 {
+            if !self.spaces[space].has_in_flight() {
                 continue;
             }
             if space == SpaceId::Data {
@@ -1886,6 +1944,14 @@ impl Connection {
             // Update outgoing spin bit, inverting iff we're the client
             self.spin = self.side.is_client() ^ spin;
         }
+
+        self.config.qlog_sink.emit_packet_received(
+            packet,
+            space_id,
+            !is_1rtt,
+            now,
+            self.orig_rem_cid,
+        );
     }
 
     fn reset_idle_timeout(&mut self, now: Instant, space: SpaceId) {
@@ -1954,6 +2020,14 @@ impl Connection {
         if let Some(data) = remaining {
             self.handle_coalesced(now, remote, ecn, data);
         }
+
+        self.config.qlog_sink.emit_recovery_metrics(
+            self.pto_count,
+            &mut self.path,
+            now,
+            self.orig_rem_cid,
+        );
+
         Ok(())
     }
 
@@ -2119,10 +2193,9 @@ impl Connection {
         space.crypto = None;
         space.time_of_last_ack_eliciting_packet = None;
         space.loss_time = None;
-        space.in_flight = 0;
         let sent_packets = mem::take(&mut space.sent_packets);
-        for (pn, packet) in sent_packets.into_iter() {
-            self.remove_in_flight(pn, &packet);
+        for packet in sent_packets.into_values() {
+            self.remove_in_flight(&packet);
         }
         self.set_loss_detection_timer(now)
     }
@@ -2272,6 +2345,7 @@ impl Connection {
                             packet.header.is_1rtt(),
                         );
                     }
+
                     self.process_decrypted_packet(now, remote, number, packet)
                 }
             }
@@ -2411,7 +2485,7 @@ impl Connection {
 
                 let space = &mut self.spaces[SpaceId::Initial];
                 if let Some(info) = space.take(0) {
-                    self.on_packet_acked(now, 0, info);
+                    self.on_packet_acked(now, info);
                 };
 
                 self.discard_space(now, SpaceId::Initial); // Make sure we clean up after any retransmitted Initials
@@ -2431,8 +2505,8 @@ impl Connection {
 
                 // Retransmit all 0-RTT data
                 let zero_rtt = mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-                for (pn, info) in zero_rtt {
-                    self.remove_in_flight(pn, &info);
+                for info in zero_rtt.into_values() {
+                    self.remove_in_flight(&info);
                     self.spaces[SpaceId::Data].pending |= info.retransmits;
                 }
                 self.streams.retransmit_all_for_0rtt();
@@ -2497,8 +2571,8 @@ impl Connection {
                             // Discard 0-RTT packets
                             let sent_packets =
                                 mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-                            for (pn, packet) in sent_packets {
-                                self.remove_in_flight(pn, &packet);
+                            for packet in sent_packets.into_values() {
+                                self.remove_in_flight(&packet);
                             }
                         } else {
                             self.accepted_0rtt = true;
@@ -3001,11 +3075,12 @@ impl Connection {
 
     fn migrate(&mut self, now: Instant, remote: SocketAddr) {
         trace!(%remote, "migration initiated");
+        self.path_counter = self.path_counter.wrapping_add(1);
         // Reset rtt/congestion state for new path unless it looks like a NAT rebinding.
         // Note that the congestion window will not grow until validation terminates. Helps mitigate
         // amplification attacks performed by spoofing source addresses.
         let mut new_path = if remote.is_ipv4() && remote.ip() == self.path.remote.ip() {
-            PathData::from_previous(remote, &self.path, now)
+            PathData::from_previous(remote, &self.path, self.path_counter, now)
         } else {
             let peer_max_udp_payload_size =
                 u16::try_from(self.peer_params.max_udp_payload_size.into_inner())
@@ -3014,6 +3089,7 @@ impl Connection {
                 remote,
                 self.allow_mtud,
                 Some(peer_max_udp_payload_size),
+                self.path_counter,
                 now,
                 &self.config,
             )
@@ -3075,7 +3151,13 @@ impl Connection {
         }
 
         // Subtract 1 to account for the CID we supplied while handshaking
-        let n = self.peer_params.issue_cids_limit() - 1;
+        let mut n = self.peer_params.issue_cids_limit() - 1;
+        if let ConnectionSide::Server { server_config } = &self.side {
+            if server_config.has_preferred_address() {
+                // We also sent a CID in the transport parameters
+                n -= 1;
+            }
+        }
         self.endpoint_events
             .push_back(EndpointEventInner::NeedIdentifiers(now, n));
     }
@@ -3240,7 +3322,7 @@ impl Connection {
         }
 
         // NEW_CONNECTION_ID
-        while buf.len() + 44 < max_size {
+        while buf.len() + NewConnectionId::SIZE_BOUND < max_size {
             let issued = match space.pending.new_cids.pop() {
                 Some(x) => x,
                 None => break,
@@ -3570,12 +3652,6 @@ impl Connection {
             .map_or(true, |(timer, _)| timer == Timer::Idle)
     }
 
-    /// Total number of outgoing packets that have been deemed lost
-    #[cfg(test)]
-    pub(crate) fn lost_packets(&self) -> u64 {
-        self.lost_packets
-    }
-
     /// Whether explicit congestion notification is in use on outgoing packets.
     #[cfg(test)]
     pub(crate) fn using_ecn(&self) -> bool {
@@ -3633,13 +3709,13 @@ impl Connection {
     }
 
     /// Update counters to account for a packet becoming acknowledged, lost, or abandoned
-    fn remove_in_flight(&mut self, pn: u64, packet: &SentPacket) {
-        // Visit known paths from newest to oldest to find the one `pn` was sent on
+    fn remove_in_flight(&mut self, packet: &SentPacket) {
+        // Visit known paths from newest to oldest to find the one `packet` was sent on
         for path in [&mut self.path]
             .into_iter()
             .chain(self.prev_path.as_mut().map(|(_, data)| data))
         {
-            if path.remove_in_flight(pn, packet) {
+            if path.remove_in_flight(packet) {
                 return;
             }
         }
@@ -3992,13 +4068,6 @@ const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_OR_0RTT_HEADER_SIZE + 32;
 // scid len + scid + length + pn
 const MAX_HANDSHAKE_OR_0RTT_HEADER_SIZE: usize =
     1 + 4 + 1 + MAX_CID_SIZE + 1 + MAX_CID_SIZE + VarInt::from_u32(u16::MAX as u32).size() + 4;
-
-/// The maximum amount of datagrams that are sent in a single transmit
-///
-/// This can be lower than the maximum platform capabilities, to avoid excessive
-/// memory allocations when calling `poll_transmit()`. Benchmarks have shown
-/// that numbers around 10 are a good compromise.
-const MAX_TRANSMIT_SEGMENTS: usize = 10;
 
 /// Perform key updates this many packets before the AEAD confidentiality limit.
 ///

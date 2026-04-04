@@ -76,8 +76,8 @@ impl Endpoint {
             }
         }
         socket.bind(&addr.into())?;
-        let runtime = default_runtime()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no async runtime found"))?;
+        let runtime =
+            default_runtime().ok_or_else(|| io::Error::other("no async runtime found"))?;
         Self::new_with_abstract_socket(
             EndpointConfig::default(),
             None,
@@ -100,8 +100,8 @@ impl Endpoint {
     #[cfg(all(not(wasm_browser), any(feature = "aws-lc-rs", feature = "ring")))] // `EndpointConfig::default()` is only available with these
     pub fn server(config: ServerConfig, addr: SocketAddr) -> io::Result<Self> {
         let socket = std::net::UdpSocket::bind(addr)?;
-        let runtime = default_runtime()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no async runtime found"))?;
+        let runtime =
+            default_runtime().ok_or_else(|| io::Error::other("no async runtime found"))?;
         Self::new_with_abstract_socket(
             EndpointConfig::default(),
             Some(config),
@@ -256,6 +256,10 @@ impl Endpoint {
         for sender in inner.recv_state.connections.senders.values() {
             // Ignoring errors from dropped connections
             let _ = sender.send(ConnectionEvent::Rebind(inner.socket.clone()));
+        }
+        if let Some(driver) = inner.driver.take() {
+            // Ensure the driver can register for wake-ups from the new socket
+            driver.wake();
         }
 
         Ok(())
