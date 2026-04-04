@@ -4,7 +4,6 @@ use crate::Instant;
 use crate::connection::RttEstimator;
 use std::any::Any;
 use std::sync::Arc;
-use crate::ConfigError;
 
 mod bbr;
 mod cubic;
@@ -13,14 +12,6 @@ mod new_reno;
 pub use bbr::{Bbr, BbrConfig};
 pub use cubic::{Cubic, CubicConfig};
 pub use new_reno::{NewReno, NewRenoConfig};
-
-#[derive(Debug, Clone)]
-pub enum CongestionParameter {
-    // for brutal
-    PeerBandwidthHint(u64),
-    CwndGain(f64),
-    AckCompensation(bool),
-}
 
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {
@@ -79,10 +70,6 @@ pub trait Controller: Send + Sync {
 
     /// Initial congestion window
     fn initial_window(&self) -> u64;
-
-    // Set custom parameter for congestion controller
-    #[allow(unused_variables)]
-    fn set_parameter(&mut self, param: CongestionParameter) -> Result<(), ConfigError> { Ok(()) }
 
     /// Returns Self for use in down-casting to extract implementation details
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
