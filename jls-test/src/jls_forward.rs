@@ -86,7 +86,7 @@ async fn handle_quic_request(
 
 async fn make_jls_server(resp: String, port: u16) -> Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = cert.cert.into();
 
     let mut server_crypto = rustls::ServerConfig::builder()
@@ -115,8 +115,8 @@ async fn make_jls_server(resp: String, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn make_quic_server(cert: CertifiedKey, resp: String, port: u16) -> Result<()> {
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+async fn make_quic_server(cert: CertifiedKey<rcgen::KeyPair>, resp: String, port: u16) -> Result<()> {
+    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = cert.cert.into();
 
     let mut server_crypto = quinn_raw::rustls::ServerConfig::builder()

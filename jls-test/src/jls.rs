@@ -84,7 +84,7 @@ async fn handle_request(
 
 async fn make_server(resp: String, port: u16) -> Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = cert.cert.into();
 
     let mut server_crypto = rustls::ServerConfig::builder()
