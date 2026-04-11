@@ -639,12 +639,43 @@ impl Endpoint {
         self.index.insert_initial(dst_cid, ch);
 
         // For JLS forward
-        let packet_clone = InitialPacket {
-            header: incoming.packet.header.clone(),
-            header_data: incoming.packet.header_data.clone(),
-            payload: incoming.packet.payload.clone(),
+        let (fwd_buf, trans_vec) = {
+            let mut fwd_buf = std::vec![];
+            let packet_clone = InitialPacket {
+                header: incoming.packet.header.clone(),
+                header_data: incoming.packet.header_data.clone(),
+                payload: incoming.packet.payload.clone(),
+            };
+            let packet_rest = incoming.rest.clone();
+            let packet_clone: Packet = packet_clone.into();
+            let _partial_encode = packet_clone.header.encode(&mut fwd_buf); // To be confirmed
+            fwd_buf.extend_from_slice(&packet_clone.payload);
+            fwd_buf.extend_from_slice(&packet_rest.unwrap_or_default());
+            let mut trans_vec = std::vec![];
+            let trans = Transmit {
+                destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
+                ecn: incoming.ecn,
+                size: fwd_buf.len(),
+                segment_size: None,
+                src_ip: None,
+            };
+            trans_vec.push(trans);
+            for event in &incoming_buffer.datagrams {
+                let pos = fwd_buf.len();
+                fwd_buf.extend_from_slice(event.first_decode.data());
+                fwd_buf.extend_from_slice(event.remaining.as_ref().unwrap_or(&BytesMut::new()));
+                let trans = Transmit {
+                    destination: event.remote, // Will be replaced later by jls upstream address
+                    ecn: event.ecn,
+                    size: fwd_buf.len() - pos,
+                    segment_size: None,
+                    src_ip: None,
+                };
+                trans_vec.push(trans);
+            }
+            (fwd_buf, trans_vec)
         };
-        let packet_rest = incoming.rest.clone();
+        // End of JLS forward preparation
 
         match conn.handle_first_packet(
             incoming.received_at,
@@ -655,41 +686,24 @@ impl Endpoint {
             incoming.rest,
         ) {
             Ok(()) => {
+
+                trace!(id = ch.0, icid = %dst_cid, "new connection");
+
+                for event in incoming_buffer.datagrams {
+                    conn.handle_event(ConnectionEvent(ConnectionEventInner::Datagram(event)))
+                }
+                debug!("jls state:{:?}", conn.crypto_session().is_jls());
                 // JLS Check
                 // This requires the client hello must be fully received in the first packet
                 // Or the connection will be forwarded
                 if conn.crypto_session().is_jls_enabled() && 
-                conn.crypto_session().is_jls() != Some(true) {
+                conn.crypto_session().is_jls() == Some(false) {
                     debug!("Accept JLS connection failed");
                     let conn_meta = self.connections.remove(ch.0);
                     self.index.remove(&conn_meta);
 
-                    let packet_clone: Packet = packet_clone.into();
-                    let _partial_encode = packet_clone.header.encode(buf); // To be confirmed
-                    buf.extend_from_slice(&packet_clone.payload);
-                    buf.extend_from_slice(&packet_rest.unwrap_or_default());
-                    let mut trans_vec = vec![];
-                    let trans = Transmit {
-                        destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
-                        ecn: incoming.ecn,
-                        size: buf.len(),
-                        segment_size: None,
-                        src_ip: None,
-                    };
-                    trans_vec.push(trans);
-                    for event in incoming_buffer.datagrams {
-                        let pos = buf.len();
-                        buf.extend_from_slice(event.first_decode.data());
-                        buf.extend_from_slice(event.remaining.unwrap_or_default().as_ref());
-                        let trans = Transmit {
-                            destination: event.remote, // Will be replaced later by jls upstream address
-                            ecn: event.ecn,
-                            size: buf.len() - pos,
-                            segment_size: None,
-                            src_ip: None,
-                        };
-                        trans_vec.push(trans);
-                    }
+                    buf.extend_from_slice(&fwd_buf);
+
                     return Err(AcceptError {
                         cause: ConnectionError::JlsAuthFailed(JlsAuthInner {
                             upstream_addr: conn.crypto_session().jls_upstream_addr(),
@@ -698,13 +712,6 @@ impl Endpoint {
                     });
                 }
                 // JLS Check End
-
-                trace!(id = ch.0, icid = %dst_cid, "new connection");
-
-                for event in incoming_buffer.datagrams {
-                    conn.handle_event(ConnectionEvent(ConnectionEventInner::Datagram(event)))
-                }
-
                 Ok((ch, conn))
             }
             Err(e) => {
