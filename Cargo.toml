@@ -36,7 +36,7 @@ rcgen = "0.13"
 ring = "0.17"
 rustc-hash = "2"
 #rustls = { git="https://github.com/spongebob888/rustls-jls", tag="v/0.23.36-1.3.1", default-features = false, features = ["std"] }
-rustls = { package = "rustls", git="https://github.com/hrimfaxi/rustls-jls", branch="fix-spurious-curl-handshake-error", default-features = false, features = ["std","ring", "logging"]}
+rustls = { package = "rustls", git="https://github.com/hrimfaxi/rustls-jls", branch="test", default-features = false, features = ["std","ring", "logging"]}
 rustls-pemfile = "2"
 rustls-platform-verifier = { git="https://github.com/spongebob888/rustls-platform-verifier", version="0.5.1-1.1.0" }
 rustls-pki-types = "1.7"
