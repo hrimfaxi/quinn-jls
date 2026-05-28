@@ -146,13 +146,20 @@ impl MtuDiscovery {
     /// Returns true if a black hole was detected
     ///
     /// Calling this function will close the previous loss burst. If a black hole is detected, the
-    /// current MTU will be reset to `min_mtu`.
+    /// current MTU will be reset to `min_mtu`, unless
+    /// [`MtuDiscoveryConfig::blackhole_reset_mtu`] has been set to `false`.
     pub(crate) fn black_hole_detected(&mut self, now: Instant) -> bool {
         if !self.black_hole_detector.black_hole_detected() {
             return false;
         }
 
-        self.current_mtu = self.black_hole_detector.min_mtu;
+        let reset_mtu = self
+            .state
+            .as_ref()
+            .map_or(true, |state| state.config.blackhole_reset_mtu);
+        if reset_mtu {
+            self.current_mtu = self.black_hole_detector.min_mtu;
+        }
 
         if let Some(state) = &mut self.state {
             state.on_black_hole_detected(now);
