@@ -658,6 +658,11 @@ impl Connection {
         let conn = self.0.state.lock("get jls authentication state");
         conn.inner.crypto_session().is_jls()
     }
+    /// Return authenticated jls username if it's a authenticated JLS connection, otherwise return None
+    pub fn jls_chosen_user(&self) -> Option<String> {
+        let conn = self.0.state.lock("get jls chosen user");
+        conn.inner.crypto_session().jls_chosen_user()
+    }
 }
 
 pin_project! {

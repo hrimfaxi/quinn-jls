@@ -101,9 +101,13 @@ pub trait Session: Send + Sync + 'static {
     fn is_jls_enabled(&self) -> bool {
         unimplemented!()
     }
-    /// Return the jls forward upstream addr return None if not found or it's 
+    /// Return the jls forward upstream addr return None if not found or it's
     /// authentic jls connection
     fn jls_upstream_addr(&self) -> Option<String> {
+        unimplemented!()
+    }
+    /// Return the chosen jls user name if authenticated suscessfully, otherwise return None
+    fn jls_chosen_user(&self) -> Option<String> {
         unimplemented!()
     }
 }
