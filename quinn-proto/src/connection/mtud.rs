@@ -613,7 +613,7 @@ mod tests {
         let mut mtud = MtuDiscovery::disabled(1_400, 1_250);
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1{
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }
@@ -639,7 +639,7 @@ mod tests {
         let mut mtud = default_mtud();
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1 {
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }
