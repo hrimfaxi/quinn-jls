@@ -689,6 +689,7 @@ pub struct MtuDiscoveryConfig {
     pub(crate) upper_bound: u16,
     pub(crate) minimum_change: u16,
     pub(crate) black_hole_cooldown: Duration,
+    pub(crate) blackhole_reset_mtu: bool,
 }
 
 impl MtuDiscoveryConfig {
@@ -730,6 +731,16 @@ impl MtuDiscoveryConfig {
         self.minimum_change = value;
         self
     }
+
+    /// Whether to reset the current MTU to `min_mtu` when a black hole is detected.
+    ///
+    /// Defaults to `true`, matching the standard PLPMTUD behavior. Set to `false` to keep the
+    /// previously discovered MTU after a black hole is detected (the cooldown timer still applies
+    /// before a new MTU search is started).
+    pub fn blackhole_reset_mtu(&mut self, value: bool) -> &mut Self {
+        self.blackhole_reset_mtu = value;
+        self
+    }
 }
 
 impl Default for MtuDiscoveryConfig {
@@ -739,6 +750,7 @@ impl Default for MtuDiscoveryConfig {
             upper_bound: 1452,
             black_hole_cooldown: Duration::from_secs(60),
             minimum_change: 20,
+            blackhole_reset_mtu: true,
         }
     }
 }

@@ -15,24 +15,12 @@ use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    Duration, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken,
-    Side, Transmit, TransportConfig, TransportError,
-    cid_generator::ConnectionIdGenerator,
-    coding::BufMutExt,
-    config::{ClientConfig, EndpointConfig, ServerConfig},
-    connection::{Connection, ConnectionError, SideArgs},
-    crypto::{self, Keys, UnsupportedVersion},
-    frame,
-    packet::{
-        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError,
-        PacketNumber, PartialDecode, ProtectedInitialHeader,
-    },
-    shared::{
+    cid_generator::ConnectionIdGenerator, coding::BufMutExt, config::{ClientConfig, EndpointConfig, ServerConfig}, connection::{Connection, ConnectionError, JlsAuthInner, SideArgs}, crypto::{self, Keys, UnsupportedVersion}, frame, packet::{
+        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, Packet, PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader
+    }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
-    },
-    token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload},
-    transport_parameters::{PreferredAddress, TransportParameters},
+    }, token::{IncomingToken, InvalidRetryTokenError, Token, TokenPayload}, transport_parameters::{PreferredAddress, TransportParameters}, Duration, Instant, ResetToken, Side, Transmit, TransportConfig, TransportError, INITIAL_MTU, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE
 };
 
 /// The main entry point to the library
@@ -228,19 +216,33 @@ impl Endpoint {
             }
         } else if event.first_decode.initial_header().is_some() {
             // Potentially create a new connection
-
+            tracing::trace!("initial packet received");
             self.handle_first_packet(datagram_len, event, addresses, buf)
         } else if event.first_decode.has_long_header() {
-            debug!(
-                "ignoring non-initial packet for unknown connection {}",
+            warn!(
+                "ignoring non-initial long header packet for unknown connection {}",
                 dst_cid
             );
             None
         } else if !event.first_decode.is_initial()
             && self.local_cid_generator.validate(dst_cid).is_err()
         {
-            debug!("dropping packet with invalid CID");
-            None
+            // If we got this far, we're receiving a seemingly valid packet for an unknown
+            // connection. Send a stateless reset if possible.
+
+            warn!("dropping packet with invalid CID");
+            
+
+            buf.extend_from_slice(event.first_decode.data());
+            buf.extend_from_slice(event.remaining.unwrap_or_default().as_ref());
+            let trans = Transmit {
+                destination: addresses.remote,
+                ecn: event.ecn,
+                size: buf.len(), // Size is unknown until we generate the reset
+                segment_size: None,
+                src_ip: None,
+            };
+            Some(DatagramEvent::JlsUpstreamMigrate(trans))
         } else if dst_cid.is_empty() {
             trace!("dropping unrecognized short packet without ID");
             None
@@ -544,7 +546,7 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(Box::new(AcceptError {
                 cause: ConnectionError::TimedOut,
-                response: None,
+                response: Default::default(),
             }));
         }
 
@@ -553,14 +555,16 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(Box::new(AcceptError {
                 cause: ConnectionError::CidsExhausted,
-                response: Some(self.initial_close(
-                    version,
-                    incoming.addresses,
-                    &incoming.crypto,
-                    src_cid,
-                    TransportError::CONNECTION_REFUSED(""),
-                    buf,
-                )),
+                response: vec![
+                    (self.initial_close(
+                        version,
+                        incoming.addresses,
+                        &incoming.crypto,
+                        src_cid,
+                        TransportError::CONNECTION_REFUSED(""),
+                        buf,
+                    )),
+                ],
             }));
         }
 
@@ -579,7 +583,7 @@ impl Endpoint {
             self.index.remove_initial(dst_cid);
             return Err(Box::new(AcceptError {
                 cause: TransportError::PROTOCOL_VIOLATION("authentication failed").into(),
-                response: None,
+                response: Default::default(),
             }));
         };
 
@@ -628,6 +632,45 @@ impl Endpoint {
         );
         self.index.insert_initial(dst_cid, ch);
 
+        // For JLS forward
+        let (fwd_buf, trans_vec) = {
+            let mut fwd_buf = std::vec![];
+            let packet_clone = InitialPacket {
+                header: incoming.packet.header.clone(),
+                header_data: incoming.packet.header_data.clone(),
+                payload: incoming.packet.payload.clone(),
+            };
+            let packet_rest = incoming.rest.clone();
+            let packet_clone: Packet = packet_clone.into();
+            let _partial_encode = packet_clone.header.encode(&mut fwd_buf); // To be confirmed
+            fwd_buf.extend_from_slice(&packet_clone.payload);
+            fwd_buf.extend_from_slice(&packet_rest.unwrap_or_default());
+            let mut trans_vec = std::vec![];
+            let trans = Transmit {
+                destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
+                ecn: incoming.ecn,
+                size: fwd_buf.len(),
+                segment_size: None,
+                src_ip: None,
+            };
+            trans_vec.push(trans);
+            for event in &incoming_buffer.datagrams {
+                let pos = fwd_buf.len();
+                fwd_buf.extend_from_slice(event.first_decode.data());
+                fwd_buf.extend_from_slice(event.remaining.as_ref().unwrap_or(&BytesMut::new()));
+                let trans = Transmit {
+                    destination: event.remote, // Will be replaced later by jls upstream address
+                    ecn: event.ecn,
+                    size: fwd_buf.len() - pos,
+                    segment_size: None,
+                    src_ip: None,
+                };
+                trans_vec.push(trans);
+            }
+            (fwd_buf, trans_vec)
+        };
+        // End of JLS forward preparation
+
         match conn.handle_first_packet(
             incoming.received_at,
             incoming.addresses.remote,
@@ -637,27 +680,47 @@ impl Endpoint {
             incoming.rest,
         ) {
             Ok(()) => {
+
                 trace!(id = ch.0, icid = %dst_cid, "new connection");
 
                 for event in incoming_buffer.datagrams {
                     conn.handle_event(ConnectionEvent(ConnectionEventInner::Datagram(event)))
                 }
+                debug!("jls state:{:?}", conn.crypto_session().is_jls());
+                // JLS Check
+                // This requires the client hello must be fully received in the first packet
+                // Or the connection will be forwarded
+                if conn.crypto_session().is_jls_enabled() && 
+                conn.crypto_session().is_jls() == Some(false) {
+                    debug!("Accept JLS connection failed");
+                    let conn_meta = self.connections.remove(ch.0);
+                    self.index.remove(&conn_meta);
 
+                    buf.extend_from_slice(&fwd_buf);
+
+                    return Err(Box::new(AcceptError {
+                        cause: ConnectionError::JlsAuthFailed(JlsAuthInner {
+                            upstream_addr: conn.crypto_session().jls_upstream_addr(),
+                        }),
+                        response: trans_vec,
+                    }));
+                }
+                // JLS Check End
                 Ok((ch, conn))
             }
             Err(e) => {
                 debug!("handshake failed: {}", e);
                 self.handle_event(ch, EndpointEvent(EndpointEventInner::Drained));
                 let response = match e {
-                    ConnectionError::TransportError(ref e) => Some(self.initial_close(
+                    ConnectionError::TransportError(ref e) => vec![self.initial_close(
                         version,
                         incoming.addresses,
                         &incoming.crypto,
                         src_cid,
                         e.clone(),
                         buf,
-                    )),
-                    _ => None,
+                    )],
+                    _ => vec![],
                 };
                 Err(Box::new(AcceptError { cause: e, response }))
             }
@@ -908,6 +971,11 @@ impl Endpoint {
         self.index.connection_ids.len()
     }
 
+    /// Access Server Config
+    pub fn server_config(&self) -> Option<&ServerConfig> {
+        self.server_config.as_ref().map(|x| x.as_ref())
+    }
+
     /// Whether we've used up 3/4 of the available CID space
     ///
     /// We leave some space unused so that `new_cid` can be relied upon to finish quickly. We don't
@@ -1147,6 +1215,11 @@ pub enum DatagramEvent {
     NewConnection(Incoming),
     /// Response generated directly by the endpoint
     Response(Transmit),
+    /// JLS upstream migration detected
+    /// If JLS forwarding is ongoing, while client initiates an active migration
+    /// Then both the remote address and CID will change.
+    /// In this case, an unknow CID will be received
+    JlsUpstreamMigrate(Transmit),
 }
 
 /// An incoming connection for which the server has not yet begun its part of the handshake.
@@ -1270,7 +1343,7 @@ pub struct AcceptError {
     /// Underlying error describing reason for failure
     pub cause: ConnectionError,
     /// Optional response to transmit back
-    pub response: Option<Transmit>,
+    pub response: Vec<Transmit>,
 }
 
 /// Error for attempting to retry an [`Incoming`] which already bears a token from a previous retry

@@ -49,6 +49,7 @@ mod recv_stream;
 mod runtime;
 mod send_stream;
 mod work_limiter;
+mod jls;
 
 #[cfg(not(wasm_browser))]
 pub(crate) use std::time::{Duration, Instant};

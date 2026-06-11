@@ -151,13 +151,20 @@ impl MtuDiscovery {
     /// Returns true if a black hole was detected
     ///
     /// Calling this function will close the previous loss burst. If a black hole is detected, the
-    /// current MTU will be reset to `min_mtu`.
+    /// current MTU will be reset to `min_mtu`, unless
+    /// [`MtuDiscoveryConfig::blackhole_reset_mtu`] has been set to `false`.
     pub(crate) fn black_hole_detected(&mut self, now: Instant) -> bool {
         if !self.black_hole_detector.black_hole_detected() {
             return false;
         }
 
-        self.current_mtu = self.black_hole_detector.min_mtu;
+        let reset_mtu = self
+            .state
+            .as_ref()
+            .map_or(true, |state| state.config.blackhole_reset_mtu);
+        if reset_mtu {
+            self.current_mtu = self.black_hole_detector.min_mtu;
+        }
 
         if let Some(state) = &mut self.state {
             state.on_black_hole_detected(now);
@@ -518,7 +525,7 @@ struct CurrentLossBurst {
 // https://www.rfc-editor.org/rfc/rfc8899#section-5.1.2)
 const MAX_PROBE_RETRANSMITS: usize = 3;
 /// Maximum number of suspicious loss bursts that will not trigger black hole detection
-const BLACK_HOLE_THRESHOLD: usize = 3;
+const BLACK_HOLE_THRESHOLD: usize = 6; // 3 is too small for high packet loss network(10%) which is triggered repeatedly
 
 #[cfg(test)]
 mod tests {
@@ -611,7 +618,7 @@ mod tests {
         let mut mtud = MtuDiscovery::disabled(1_400, 1_250);
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1{
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }
@@ -637,7 +644,7 @@ mod tests {
         let mut mtud = default_mtud();
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1 {
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }

@@ -1,10 +1,10 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
     future::Future,
     io::{self, IoSliceMut},
     mem,
-    net::{SocketAddr, SocketAddrV6},
+    net::{SocketAddr, SocketAddrV6, ToSocketAddrs},
     pin::Pin,
     str,
     sync::{
@@ -28,8 +28,7 @@ use crate::{
 use bytes::{Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use proto::{
-    self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent,
-    EndpointEvent, ServerConfig,
+    self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent, EcnCodepoint, EndpointEvent, ServerConfig, Transmit
 };
 use rustc_hash::FxHashMap;
 #[cfg(all(
@@ -38,7 +37,7 @@ use rustc_hash::FxHashMap;
     any(feature = "aws-lc-rs", feature = "ring"),
 ))]
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{Notify, futures::Notified, mpsc};
+use tokio::{runtime, sync::{futures::Notified, mpsc, watch::error, Notify}};
 use tracing::{Instrument, Span};
 use udp::{BATCH_SIZE, RecvMeta};
 
@@ -47,6 +46,7 @@ use crate::{
     connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
+use tracing::{debug, trace};
 /// A QUIC endpoint.
 ///
 /// An endpoint corresponds to a single UDP socket, may host many connections, and may act as both
@@ -402,6 +402,8 @@ impl Future for EndpointDriver {
         let mut keep_going = false;
         keep_going |= endpoint.drive_recv(cx, now)?;
         keep_going |= endpoint.handle_events(cx, &self.0.shared);
+        //JLS forward
+        keep_going |= endpoint.upstream_recv(cx, now)?;
 
         if !endpoint.recv_state.incoming.is_empty() {
             self.0.shared.incoming.notify_waiters();
@@ -450,6 +452,7 @@ impl EndpointInner {
         let mut state = self.state.lock().unwrap();
         let mut response_buffer = Vec::new();
         let now = state.runtime.now();
+        let remote_addr = incoming.remote_address();
         match state
             .inner
             .accept(incoming, now, &mut response_buffer, server_config)
@@ -464,7 +467,17 @@ impl EndpointInner {
                     .insert(handle, conn, sender, runtime))
             }
             Err(error) => {
-                if let Some(transmit) = error.response {
+                if let ConnectionError::JlsAuthFailed(inner) = &error.cause {
+                    if let Some(upstream_addr) = &inner.upstream_addr {
+                        let runtime = state.runtime.clone();
+                        crate::jls::insert_forward_conn(&mut state.recv_state.jls_state,
+                             &*runtime,
+                             error.response, &response_buffer, 
+                             upstream_addr, remote_addr, now)?;
+                    }
+                    return Err(error.cause);
+                }
+                for transmit in error.response {
                     respond(transmit, &response_buffer, &mut state.sender);
                 }
                 Err(error.cause)
@@ -512,6 +525,7 @@ pub(crate) struct State {
     stats: EndpointStats,
     default_client_config: Option<ClientConfig>,
 }
+
 
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -588,6 +602,79 @@ impl State {
 
         true
     }
+
+    fn upstream_recv<'a>(&'a mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
+        let mut last_err: Option<io::Error> = None;
+        let mut to_remove = Vec::<SocketAddr>::new();
+        let upstream_conns = &mut self.recv_state.jls_state.upstream_connections;
+        for (remote, conn) in upstream_conns.iter_mut() {
+            let mut metas = [RecvMeta::default(); BATCH_SIZE];
+            let mut iovs: [IoSliceMut; BATCH_SIZE] = {
+                let mut bufs = conn
+                    .from_upstream
+                    .chunks_mut(conn.from_upstream.len() / BATCH_SIZE)
+                    .map(IoSliceMut::new);
+
+                // expect() safe as self.recv_buf is chunked into BATCH_SIZE items
+                // and iovs will be of size BATCH_SIZE, thus from_fn is called
+                // exactly BATCH_SIZE times.
+                std::array::from_fn(|_| bufs.next().expect("BATCH_SIZE elements"))
+            };
+
+            loop {
+                match conn.upstream_socket.poll_recv(cx, &mut iovs, &mut metas) {
+                    Poll::Ready(Ok(msgs)) => {
+                        for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
+                            let data = &buf[0..meta.len];
+                            let segment_size = if meta.stride < meta.len {
+                                Some(meta.stride)
+                            } else {
+                                None
+                            };
+                            let trans = Transmit {
+                                destination: remote.clone(),
+                                ecn: meta
+                                    .ecn
+                                    .map(|x| proto::EcnCodepoint::from_bits(x as u8).unwrap()),
+                                segment_size: segment_size,
+                                src_ip: None,
+                                size: data.len(),
+                            };
+
+                            conn.recv_limiter.try_send(data, trans, &mut self.socket.create_sender(), now);
+                            trace!("recv from upstream: {:?} bytes", data.len());
+                        }
+                        conn.active_time = now;
+                    }
+                    Poll::Pending => {
+                        if now.duration_since(conn.active_time).as_secs() > 60 * 2 {
+                            to_remove.push(remote.clone());
+                            //trace!("remove old forward connection from {:?}", remote);
+                        }
+                        break;
+                    }
+                    Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::ConnectionReset => {
+                        continue;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        last_err = Some(e);
+                        to_remove.push(remote.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        // TODO remove old connections
+        for k in to_remove.iter() {
+            tracing::debug!("remove forward connection from {:?}", k);
+            upstream_conns.remove(k);
+        }
+        if let Some(e) = last_err {
+            Err(e)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 impl Drop for State {
@@ -598,7 +685,7 @@ impl Drop for State {
     }
 }
 
-fn respond(
+pub(crate) fn respond(
     transmit: proto::Transmit,
     response_buffer: &[u8],
     sender: &mut Pin<Box<dyn UdpSender>>,
@@ -656,6 +743,7 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
         udp::EcnCodepoint::Ce => proto::EcnCodepoint::Ce,
     }
 }
+
 
 #[derive(Debug)]
 struct ConnectionSet {
@@ -810,6 +898,9 @@ struct RecvState {
     connections: ConnectionSet,
     recv_buf: Box<[u8]>,
     recv_limiter: WorkLimiter,
+
+    /// JLS state
+    jls_state: crate::jls::JlsState,
 }
 
 impl RecvState {
@@ -833,6 +924,8 @@ impl RecvState {
             incoming: VecDeque::new(),
             recv_buf: recv_buf.into(),
             recv_limiter: WorkLimiter::new(RECV_TIME_BOUND),
+            jls_state: crate::jls::JlsState::new(endpoint.server_config()
+            .and_then(|x|Some(x.crypto.jls_rate_limit())).unwrap_or_default()),
         }
     }
 
@@ -866,6 +959,9 @@ impl RecvState {
                         let mut data: BytesMut = buf[0..meta.len].into();
                         while !data.is_empty() {
                             let buf = data.split_to(meta.stride.min(data.len()));
+                            if self.jls_state.handle_jls_forward(&buf, meta, now) {
+                                continue;
+                            }
                             let mut response_buffer = Vec::new();
                             match endpoint.handle(
                                 now,
@@ -896,6 +992,28 @@ impl RecvState {
                                 }
                                 Some(DatagramEvent::Response(transmit)) => {
                                     respond(transmit, &response_buffer, sender);
+                                }
+                                Some(DatagramEvent::JlsUpstreamMigrate(transmit)) => {
+                                    // JLS forward connection
+                                    if let Some(upstream_addr) = endpoint.server_config()
+                                    .and_then(|x|x.crypto.jls_upstream_addr())
+                                     {
+                                        // Some system may falsely trigger this after hibernation
+                                        // See https://github.com/spongebob888/shadowquic/issues/52
+                                        if !self.jls_state.upstream_connections.is_empty() {
+                                            if let Err(e) = crate::jls::insert_forward_conn(
+                                                &mut self.jls_state,
+                                                runtime,
+                                                vec![transmit],
+                                                &response_buffer,
+                                                &upstream_addr,
+                                                meta.addr,
+                                                now,
+                                            ) {
+                                                tracing::error!("insert forward conn failed: {}", e);
+                                            }
+                                        }
+                                    }
                                 }
                                 None => {}
                             }

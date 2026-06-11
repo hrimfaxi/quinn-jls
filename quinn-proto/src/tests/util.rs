@@ -401,6 +401,7 @@ impl TestEndpoint {
                         self.outbound.extend(split_transmit(transmit, &buf[..size]));
                         buf.clear();
                     }
+                    DatagramEvent::JlsUpstreamMigrate(_t) => {}
                 }
             }
         }
@@ -480,7 +481,7 @@ impl TestEndpoint {
                 Ok(ch)
             }
             Err(error) => {
-                if let Some(transmit) = error.response {
+                for transmit in error.response {
                     let size = transmit.size;
                     self.outbound.extend(split_transmit(transmit, &buf[..size]));
                 }

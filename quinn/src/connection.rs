@@ -695,6 +695,18 @@ impl Connection {
         // May need to send MAX_STREAMS to make progress
         conn.wake();
     }
+
+    /// Whether it's a authentcated JLS connection
+    /// Some(true) for jls. Some(false) for tls. None for not hankshaking
+    pub fn is_jls(&self) -> Option<bool> {
+        let conn = self.0.state.lock("get jls authentication state");
+        conn.inner.crypto_session().is_jls()
+    }
+    /// Return authenticated jls username if it's a authenticated JLS connection, otherwise return None
+    pub fn jls_chosen_user(&self) -> Option<String> {
+        let conn = self.0.state.lock("get jls chosen user");
+        conn.inner.crypto_session().jls_chosen_user()
+    }
 }
 
 pin_project! {

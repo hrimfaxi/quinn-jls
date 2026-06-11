@@ -209,6 +209,36 @@ impl crypto::Session for TlsSession {
             .map_err(|_| ExportKeyingMaterialError)?;
         Ok(())
     }
+
+    fn is_jls(&self) -> Option<bool> {
+        match self.inner.jls_authed {
+            rustls::jls::JlsState::AuthFailed(_) => Some(false),
+            rustls::jls::JlsState::AuthSuccess(_) => Some(true),
+            rustls::jls::JlsState::NotAuthed | rustls::jls::JlsState::Disabled => None,
+
+        }
+    }
+
+    fn is_jls_enabled(&self) -> bool {
+       !matches!(self.inner.jls_authed, rustls::jls::JlsState::Disabled)
+    }
+
+    fn jls_upstream_addr(&self) -> Option<String> {
+        match &self.inner {
+            Connection::Server(conn) => {
+                return conn.get_upstream_addr();
+            }
+            Connection::Client(_) => {
+                panic!("tls client doesn't implement upstream addr");
+            }
+        }
+    }
+    fn jls_chosen_user(&self) -> Option<String> {
+        match self.inner.jls_authed {
+            rustls::jls::JlsState::AuthSuccess(ref user) => Some(user.user_iv.clone()),
+            _ => None,
+       }
+    }
 }
 
 const RETRY_INTEGRITY_KEY_DRAFT: [u8; 16] = [
@@ -561,6 +591,13 @@ impl crypto::ServerConfig for QuicServerConfig {
         let mut result = [0; 16];
         result.copy_from_slice(tag.as_ref());
         result
+    }
+    fn jls_upstream_addr(&self) -> Option<String> {
+        self.inner.jls_config.upstream_addr.clone()
+    }
+
+    fn jls_rate_limit(&self) -> u64 {
+        self.inner.jls_config.rate_limit
     }
 }
 
