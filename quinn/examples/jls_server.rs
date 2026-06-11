@@ -3,13 +3,20 @@
 //! Checkout the `README.md` for guidance.
 
 use std::{
-    ascii, fs, io, net::SocketAddr, path::{self, Path, PathBuf}, str, sync::Arc
+    ascii, fs, io,
+    net::SocketAddr,
+    path::{self, Path, PathBuf},
+    str,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use proto::crypto::rustls::QuicServerConfig;
-use rustls::{pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer}, jls::JlsServerConfig};
+use rustls::{
+    jls::JlsServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
+};
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
@@ -67,19 +74,22 @@ fn main() {
 #[tokio::main]
 async fn run(options: Opt) -> Result<()> {
     let (certs, key) = if let (Some(key_path), Some(cert_path)) = (&options.key, &options.cert) {
-        let key = fs::read(key_path).context("failed to read private key")?;
         let key = if key_path.extension().is_some_and(|x| x == "der") {
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                fs::read(key_path).context("failed to read private key file")?,
+            ))
         } else {
-            rustls_pemfile::private_key(&mut &*key)
-                .context("malformed PKCS #1 private key")?
-                .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
+            PrivateKeyDer::from_pem_file(key_path)
+                .context("failed to read PEM from private key file")?
         };
-        let cert_chain = fs::read(cert_path).context("failed to read certificate chain")?;
+
         let cert_chain = if cert_path.extension().is_some_and(|x| x == "der") {
-            vec![CertificateDer::from(cert_chain)]
+            vec![CertificateDer::from(
+                fs::read(cert_path).context("failed to read certificate chain file")?,
+            )]
         } else {
-            rustls_pemfile::certs(&mut &*cert_chain)
+            CertificateDer::pem_file_iter(cert_path)
+                .context("failed to read PEM from certificate chain file")?
                 .collect::<Result<_, _>>()
                 .context("invalid PEM-encoded certificate")?
         };
@@ -117,8 +127,13 @@ async fn run(options: Opt) -> Result<()> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    server_crypto.jls_config = JlsServerConfig::new("user_pwd".into(), "user_iv".into(),
-     options.upstream_addr, None).into();
+    server_crypto.jls_config = JlsServerConfig::new(
+        "user_pwd".into(),
+        "user_iv".into(),
+        options.upstream_addr,
+        None,
+    )
+    .into();
     server_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     if options.keylog {
         server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
